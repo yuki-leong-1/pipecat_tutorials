@@ -1,30 +1,30 @@
 """
-Step 5 — Web Transport（浏览器可访问）
-======================================
-从"本地麦克风"升级成"浏览器连接"。
-运行后，在 http://localhost:7860/client 用浏览器打开就可以对话。
+Step 5 — Web Transport (browser-accessible)
+============================================
+Upgrade from "local microphone" to "browser connection".
+After running, open http://localhost:7860/client in your browser to start a conversation.
 
-你会学到：
-    1. Pipecat Runner 系统 ── 统一处理 transport 选择和服务器启动
-    2. transport_params 字典 ── 支持多种 transport，命令行切换
-    3. 事件处理 ── on_client_connected / on_client_disconnected
-    4. 两种 web transport 的区别：
-       - webrtc (SmallWebRTC) ── 无需额外 key，P2P 直连
-       - daily              ── 需要 DAILY_API_KEY，多方通话支持更好
+What you'll learn:
+    1. Pipecat Runner system — handles transport selection and server startup uniformly
+    2. transport_params dict — supports multiple transports, switchable from the command line
+    3. Event handling — on_client_connected / on_client_disconnected
+    4. The difference between the two web transports:
+       - webrtc (SmallWebRTC) — no extra key needed, P2P direct connection
+       - daily              — requires DAILY_API_KEY, better support for multi-party calls
 
-运行方式：
-    # 方式 1：WebRTC（无需 Daily key）
+How to run:
+    # Option 1: WebRTC (no Daily key required)
     uv run python examples/step5_web_transport.py --transport webrtc
 
-    # 方式 2：Daily（需要 DAILY_API_KEY）
+    # Option 2: Daily (requires DAILY_API_KEY)
     uv run python examples/step5_web_transport.py --transport daily
 
-    然后打开浏览器 → http://localhost:7860/client
+    Then open your browser → http://localhost:7860/client
 
-所需 API key：DEEPGRAM + OPENAI + ELEVENLABS
-可选 API key：DAILY_API_KEY（只在 --transport daily 时需要）
+Required API keys: DEEPGRAM + OPENAI + ELEVENLABS
+Optional API key:  DAILY_API_KEY (only needed when using --transport daily)
 
-申请 Daily 免费账号：https://dashboard.daily.co/u/signup
+Sign up for a free Daily account: https://dashboard.daily.co/u/signup
 """
 
 import os
@@ -43,7 +43,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 
-# Runner 工具：负责解析 --transport 参数，创建对应的 transport
+# Runner utility: responsible for parsing the --transport argument and creating the corresponding transport
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 
@@ -52,10 +52,10 @@ from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 
-# FastAPI WebSocket（--transport twilio 时用，也可以直接 WebSocket 连接）
+# FastAPI WebSocket (used with --transport twilio, or for direct WebSocket connections)
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
 
-# Daily 只在实际选择时才 import（daily-python 不支持 Windows，延迟 import 避免报错）
+# Daily is imported only when actually selected (daily-python does not support Windows; deferred import avoids errors)
 def _daily_params():
     from pipecat.transports.daily.transport import DailyParams
     return DailyParams(audio_in_enabled=True, audio_out_enabled=True)
@@ -64,21 +64,21 @@ load_dotenv()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# transport_params：一个字典，key = transport 名字，value = 对应的 Params
+# transport_params: a dict where key = transport name, value = its Params
 #
-# 这是 Pipecat 推荐的模式，让同一份代码支持多种 transport。
-# 实际用哪个由命令行参数 --transport 决定。
+# This is the recommended Pipecat pattern for supporting multiple transports
+# from a single codebase. The active transport is chosen via --transport.
 # ═══════════════════════════════════════════════════════════════════════════
 transport_params = {
-    # SmallWebRTC：轻量 P2P WebRTC，内建于 pipecat，不需要额外服务
+    # SmallWebRTC: lightweight P2P WebRTC built into pipecat, no extra service needed
     "webrtc": lambda: TransportParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
     ),
-    # Daily WebRTC：需要 DAILY_API_KEY，功能更完整（录制、多方通话等）
-    # Windows 不支持 daily-python，需要在 Linux/macOS 或 WSL2 下运行
+    # Daily WebRTC: requires DAILY_API_KEY, more fully featured (recording, multi-party calls, etc.)
+    # Windows does not support daily-python; run on Linux/macOS or WSL2
     "daily": _daily_params,
-    # Twilio / WebSocket：电话接入用
+    # Twilio / WebSocket: for telephone dial-in
     "twilio": lambda: FastAPIWebsocketParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -87,7 +87,7 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    """Bot 逻辑，transport 已经由 runner 决定好了"""
+    """Bot logic — the transport has already been decided by the runner."""
     logger.info("Bot starting...")
 
     stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
@@ -125,62 +125,64 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
-            allow_interruptions=True,  # Web 用户通常用耳机，可以开启中断
+            allow_interruptions=True,  # Web users typically wear headphones, so interruptions can be enabled
             enable_metrics=True,
         ),
-        # idle_timeout_secs：多久没活动就自动结束（从 runner_args 读取）
+        # idle_timeout_secs: how long to wait before auto-ending due to inactivity (read from runner_args)
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
     )
 
-    # ── 事件处理 ────────────────────────────────────────────────────────────
-    # on_client_connected：有浏览器/客户端连进来时触发
+    # ── Event handling ──────────────────────────────────────────────────────
+    # on_client_connected: fires when a browser/client connects
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info(f"Client connected: {client}")
-        # 客户端连进来后，让 agent 先开口打招呼
+        # Once the client connects, have the agent speak first to greet them
         context.add_message({
             "role": "developer",
             "content": "A user just connected via web browser. Greet them warmly and ask how you can help.",
         })
         await task.queue_frames([LLMRunFrame()])
 
-    # on_client_disconnected：客户端离开时触发
+    # on_client_disconnected: fires when a client leaves
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info(f"Client disconnected: {client}")
-        # 取消 pipeline，释放资源
+        # Cancel the pipeline and free resources
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
     await runner.run(task)
 
 
-# ── bot() 函数是 Pipecat Cloud 的入口点 ────────────────────────────────────
-# Pipecat Cloud 部署时会调用这个函数
-# 本地运行时，main() 也会调用它
+# ── bot() is the entry point for Pipecat Cloud ─────────────────────────────
+# Pipecat Cloud calls this function on deployment;
+# locally, main() also calls it
 async def bot(runner_args: RunnerArguments):
-    """Pipecat Cloud 兼容的入口点"""
+    """Pipecat Cloud-compatible entry point."""
     transport = await create_transport(runner_args, transport_params)
     await run_bot(transport, runner_args)
 
 
-# ── 本地运行 ────────────────────────────────────────────────────────────────
-# pipecat.runner.run.main() 会：
-#   1. 解析命令行参数（--transport, --port 等）
-#   2. 启动 FastAPI 服务器（默认 port 7860）
-#   3. 在 http://localhost:7860/client 提供内建的浏览器客户端
-#   4. 等待客户端连接后调用 bot(runner_args)
+# ── Local execution ─────────────────────────────────────────────────────────
+# pipecat.runner.run.main() will:
+#   1. Parse command-line arguments (--transport, --port, etc.)
+#   2. Start a FastAPI server (default port 7860)
+#   3. Serve the built-in browser client at http://localhost:7860/client
+#   4. Wait for a client connection, then call bot(runner_args)
 if __name__ == "__main__":
     from pipecat.runner.run import main
     main()
 
 #   ┌──────────────────────────────────┬──────────────────────────────────────────────────────┐
-#   │               方案               │                         说明                         │
+#   │             Option               │                       Description                    │
 #   ├──────────────────────────────────┼──────────────────────────────────────────────────────┤
-#   │ WSL2（推荐）                     │ Windows 里的 Linux 环境，装 pipecat-ai[daily] 没问题 │
+#   │ WSL2 (recommended)               │ Linux environment inside Windows; installs            │
+#   │                                  │ pipecat-ai[daily] without issues                     │
 #   ├──────────────────────────────────┼──────────────────────────────────────────────────────┤
-#   │ Docker                           │ 跑 Linux 容器                                        │
+#   │ Docker                           │ Run a Linux container                                │
 #   ├──────────────────────────────────┼──────────────────────────────────────────────────────┤
-#   │ 部署到 Pipecat Cloud / Linux VPS │ 生产环境自然就是 Linux                               │
+#   │ Deploy to Pipecat Cloud / Linux  │ Production environments are naturally Linux           │
+#   │ VPS                              │                                                      │
 #   └──────────────────────────────────┴──────────────────────────────────────────────────────┘
 #   uv run python .\examples\step5_web_transport.py --transport webrtc

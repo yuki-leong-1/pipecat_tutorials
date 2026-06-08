@@ -1,31 +1,31 @@
 """
-Step 16 — LLMSwitcher（运行时切换 LLM + 故障转移）
+Step 16 — LLMSwitcher (Runtime LLM Switching + Failover)
 ====================================================
-在 pipeline 运行时无缝切换 LLM，不需要重启。
+Seamlessly switch LLMs while the pipeline is running, without a restart.
 
-用途：
-    - 成本优化：默认用便宜模型（gpt-4o-mini），复杂问题切换到贵的（gpt-4o）
-    - 故障转移：某个 LLM API 报错，自动切换到备用
-    - 多语言：切换到更擅长某语言的模型
-    - A/B 测试：对比不同模型的表现
+Use cases:
+    - Cost optimization: default to a cheap model (gpt-4o-mini), switch to a pricier one (gpt-4o) for complex questions
+    - Failover: if one LLM API errors out, automatically switch to a backup
+    - Multilingual: switch to a model that handles a particular language better
+    - A/B testing: compare the behavior of different models
 
-你会学到：
-    1. LLMSwitcher — 替代单个 LLM service，在 pipeline 里管理多个 LLM
-    2. ServiceSwitcherStrategyManual — 手动触发切换
-    3. ServiceSwitcherStrategyFailover — 自动故障转移（某 LLM 报错 → 切下一个）
-    4. ManuallySwitchServiceFrame — 发这个 frame 触发手动切换
-    5. 关键前提：所有参与切换的 LLM 必须共享同一个 LLMContext
+What you'll learn:
+    1. LLMSwitcher — replaces a single LLM service and manages multiple LLMs inside the pipeline
+    2. ServiceSwitcherStrategyManual — trigger a switch manually
+    3. ServiceSwitcherStrategyFailover — automatic failover (an LLM errors → switch to the next one)
+    4. ManuallySwitchServiceFrame — send this frame to trigger a manual switch
+    5. Key requirement: all LLMs participating in the switch must share the same LLMContext
 
-在这个例子里：
-    - 默认用 gpt-4o-mini（快速便宜）
-    - 说 "switch to smart" 切换到 gpt-4o（精确但贵）
-    - 说 "switch to fast" 切回 gpt-4o-mini
-    注：如果你有 Anthropic 或 Google key，把第二个 LLM 换成那个更有意义
+In this example:
+    - gpt-4o-mini is the default (fast and cheap)
+    - Say "switch to smart" to switch to gpt-4o (more precise but expensive)
+    - Say "switch to fast" to switch back to gpt-4o-mini
+    Note: if you have an Anthropic or Google key, replacing the second LLM with one of those makes for a more meaningful demo
 
-安装：（和 step2 一样）
+Installation: (same as step2)
     uv add "pipecat-ai[local,deepgram,openai,elevenlabs,silero]"
 
-所需 API key：DEEPGRAM + OPENAI + ELEVENLABS
+Required API keys: DEEPGRAM + OPENAI + ELEVENLABS
 """
 
 import asyncio
@@ -39,7 +39,7 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
     Frame,
     LLMRunFrame,
-    ManuallySwitchServiceFrame,  # ← 这个 frame 触发手动 LLM 切换
+    ManuallySwitchServiceFrame,  # ← sending this frame triggers a manual LLM switch
     TranscriptionFrame,
     TTSSpeakFrame,
 )
@@ -47,8 +47,8 @@ from pipecat.frames.frames import (
 # ── LLMSwitcher imports ───────────────────────────────────────────────────
 from pipecat.pipeline.llm_switcher import LLMSwitcher
 from pipecat.pipeline.service_switcher import (
-    ServiceSwitcherStrategyFailover,  # 自动故障转移
-    ServiceSwitcherStrategyManual,    # 手动触发切换
+    ServiceSwitcherStrategyFailover,  # automatic failover
+    ServiceSwitcherStrategyManual,    # manually triggered switch
 )
 
 from pipecat.pipeline.pipeline import Pipeline
@@ -73,7 +73,7 @@ logger.add(sys.stderr, level="WARNING")
 
 # ── Switch Command Detector ───────────────────────────────────────────────
 class SwitchCommandDetector(FrameProcessor):
-    """监听用户指令，触发 LLM 切换"""
+    """Listens for user commands and triggers an LLM switch."""
 
     def __init__(self, llm_switcher: LLMSwitcher, llm_mini, llm_full, tts):
         super().__init__()
@@ -88,10 +88,10 @@ class SwitchCommandDetector(FrameProcessor):
 
         if isinstance(frame, TranscriptionFrame):
             text = frame.text.lower()
-            #说什么就转到什么llm，by text
+            # Route to the appropriate LLM based on what the user said
             if ("switch to smart" in text or "smart mode" in text) and self._current != "full":
                 self._current = "full"
-                # ManuallySwitchServiceFrame：告诉 LLMSwitcher 切换到指定的 LLM
+                # ManuallySwitchServiceFrame: tells LLMSwitcher to switch to the specified LLM
                 await self.push_frame(
                     ManuallySwitchServiceFrame(service=self._llm_full)
                 )
@@ -128,9 +128,9 @@ async def main():
         settings=ElevenLabsTTSService.Settings(voice="21m00Tcm4TlvDq8ikWAM"),
     )
 
-    # ── 两个 LLM 实例 ─────────────────────────────────────────────────────
-    # 关键：必须用 universal LLMContext（不是 OpenAILLMContext）
-    # 这样两个 LLM 才能共享同一个对话历史
+    # ── Two LLM instances ─────────────────────────────────────────────────
+    # Key: must use the universal LLMContext (not OpenAILLMContext)
+    # so that both LLMs share the same conversation history
     system_instruction = (
         "You are a helpful assistant. "
         "Keep responses short and conversational. "
@@ -152,20 +152,20 @@ async def main():
         ),
     )
 
-    # ── LLMSwitcher：管理多个 LLM ─────────────────────────────────────────
-    # ServiceSwitcherStrategyManual：等待 ManuallySwitchServiceFrame 触发切换
-    # ServiceSwitcherStrategyFailover：某 LLM 报非致命错误时自动切下一个
+    # ── LLMSwitcher: manages multiple LLMs ───────────────────────────────
+    # ServiceSwitcherStrategyManual: waits for a ManuallySwitchServiceFrame to trigger a switch
+    # ServiceSwitcherStrategyFailover: automatically switches to the next LLM when a non-fatal error occurs
     llm_switcher = LLMSwitcher(
-        llms=[llm_mini, llm_full],           # 第一个是默认 active
+        llms=[llm_mini, llm_full],           # first one is active by default
         strategy_type=ServiceSwitcherStrategyManual,
     )
-    # 如果要自动故障转移，换成：
+    # For automatic failover, use this instead:
     # llm_switcher = LLMSwitcher(llms=[llm_mini, llm_full], strategy_type=ServiceSwitcherStrategyFailover)
 
-    # 注册工具时用 switcher（会同时注册到所有 LLM）
+    # Register tools via the switcher (registers them on all LLMs simultaneously)
     # llm_switcher.register_function("my_tool", my_tool_handler)
 
-    context = LLMContext()  # universal LLMContext（不是 OpenAILLMContext）
+    context = LLMContext()  # universal LLMContext (not OpenAILLMContext)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
@@ -179,9 +179,9 @@ async def main():
     pipeline = Pipeline([
         transport.input(),
         stt,
-        switch_detector,         # ← 监听 "switch to smart/fast"
+        switch_detector,         # ← listens for "switch to smart/fast"
         user_aggregator,
-        llm_switcher,            # ← 替代单个 llm，内部管理哪个 LLM active
+        llm_switcher,            # ← replaces a single llm; internally tracks which LLM is active
         tts,
         transport.output(),
         assistant_aggregator,

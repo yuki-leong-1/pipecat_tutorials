@@ -1,23 +1,24 @@
 """
-Step 4 — 自定义 FrameProcessor
+Step 4 — Custom FrameProcessor
 ================================
-在 Pipecat 里，STT / LLM / TTS / VAD 全都是 FrameProcessor。
-这一步学会自己写 FrameProcessor，插入 pipeline 任意位置。
+In Pipecat, STT / LLM / TTS / VAD are all FrameProcessors.
+This step teaches you how to write your own FrameProcessor and insert it
+anywhere in a pipeline.
 
-你会学到：
-    1. FrameProcessor 的基本结构和生命周期
-    2. process_frame(frame, direction) ── 所有 frame 都经过这里
-    3. push_frame(frame) ── 把 frame 传给下一个处理器
-    4. "吞掉" frame ── 不 push_frame 就等于过滤掉
-    5. 三个实际例子：
-       - TranscriptionPrinter   把用户说的话打印到终端
-       - ConversationLogger     把对话存成 JSON 文件
-       - ConversationResetter   说 "reset" 就清空对话历史
+You will learn:
+    1. The basic structure and lifecycle of a FrameProcessor
+    2. process_frame(frame, direction) -- every frame passes through here
+    3. push_frame(frame) -- passes the frame to the next processor
+    4. "Swallowing" a frame -- not calling push_frame filters it out
+    5. Three practical examples:
+       - TranscriptionPrinter   prints what the user says to the terminal
+       - ConversationLogger     saves the conversation to a JSON file
+       - ConversationResetter   saying "reset" clears the conversation history
 
-运行方式：
+How to run:
     uv run python examples/step4_custom_processor.py
 
-所需 API key（和 step2 一样）：DEEPGRAM + OPENAI + ELEVENLABS
+Required API keys (same as step2): DEEPGRAM + OPENAI + ELEVENLABS
 """
 
 import asyncio
@@ -45,7 +46,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
-# ── 核心 import：写自定义 processor 需要这两个 ──
+# ── Core imports: these two are needed to write a custom processor ──
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
@@ -60,39 +61,40 @@ logger.add(sys.stderr, level="WARNING")
 # ═══════════════════════════════════════════════════════════════════════════
 # Processor 1：TranscriptionPrinter
 #
-# 插入位置：stt → [TranscriptionPrinter] → user_aggregator
-# 功能：每次 STT 有转录结果，就打印到终端
+# Insertion point: stt → [TranscriptionPrinter] → user_aggregator
+# Purpose: prints each STT transcription result to the terminal
 #
-# 关键概念：
-#   - 继承 FrameProcessor
-#   - 重写 process_frame，检查 frame 类型
-#   - 最后一定要 push_frame，不然 frame 不会往下走
+# Key concepts:
+#   - Subclass FrameProcessor
+#   - Override process_frame and check the frame type
+#   - Always call push_frame at the end, or the frame won't continue downstream
 # ═══════════════════════════════════════════════════════════════════════════
 class TranscriptionPrinter(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
-        # 1. 先调 super()，让基类处理系统级 frame（如 StartFrame、EndFrame）
+        # 1. Call super() first so the base class can handle system-level frames (e.g. StartFrame, EndFrame)
         await super().process_frame(frame, direction)
 
-        # 2. 检查 frame 类型，TranscriptionFrame = STT 的最终转录结果
+        # 2. Check the frame type; TranscriptionFrame = the final transcription result from STT
         if isinstance(frame, TranscriptionFrame):
             print(f"\n👤 YOU: {frame.text}")
 
-        # 3. 把 frame 传给下一个处理器
-        #    如果不 push_frame，frame 在这里消失（= 被过滤掉）
+        # 3. Pass the frame to the next processor.
+        #    If push_frame is not called, the frame disappears here (i.e. it is filtered out).
         await self.push_frame(frame, direction)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Processor 2：ConversationLogger
 #
-# 插入位置：llm → [ConversationLogger] → tts
-# 功能：把 LLM 的回复累积成完整句子，打印并存到 JSON 文件
+# Insertion point: llm → [ConversationLogger] → tts
+# Purpose: accumulates LLM replies into complete sentences, prints them,
+#          and saves them to a JSON file
 #
-# 关键概念：
-#   - LLM 输出是"流式"的：一句话 = 很多个 TextFrame 或 LLMTextFrame
-#   - 用 buffer 把碎片拼成完整句子
-#   - FrameDirection.DOWNSTREAM = frame 从上游往下流（正常方向）
+# Key concepts:
+#   - LLM output is "streaming": one sentence = many TextFrame or LLMTextFrame chunks
+#   - Use a buffer to reassemble fragments into a complete sentence
+#   - FrameDirection.DOWNSTREAM = frame flowing from upstream to downstream (normal direction)
 # ═══════════════════════════════════════════════════════════════════════════
 class ConversationLogger(FrameProcessor):
 
@@ -105,12 +107,12 @@ class ConversationLogger(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
-        # LLM 输出的文字 frame：TextFrame 或 LLMTextFrame
-        # direction == DOWNSTREAM 确保只处理从上游来的 frame（避免重复）
+        # Text frames output by the LLM: TextFrame or LLMTextFrame
+        # direction == DOWNSTREAM ensures we only process frames coming from upstream (avoids duplication)
         if isinstance(frame, (TextFrame, LLMTextFrame)) and direction == FrameDirection.DOWNSTREAM:
             self._buffer += frame.text
 
-            # 遇到句子结束符，就认为一句话说完了
+            # When a sentence-ending punctuation mark is encountered, treat the sentence as complete
             if self._buffer.strip() and frame.text.endswith((".", "!", "?", "\n")):
                 sentence = self._buffer.strip()
                 print(f"🤖 BOT: {sentence}")
@@ -132,20 +134,21 @@ class ConversationLogger(FrameProcessor):
 # ═══════════════════════════════════════════════════════════════════════════
 # Processor 3：ConversationResetter
 #
-# 插入位置：stt → TranscriptionPrinter → [ConversationResetter] → user_aggregator
-# 功能：用户说 "reset" 就清空对话历史，重新开始
+# Insertion point: stt → TranscriptionPrinter → [ConversationResetter] → user_aggregator
+# Purpose: clears the conversation history and restarts when the user says "reset"
 #
-# 关键概念：
-#   - 可以在 FrameProcessor 里直接操作外部对象（context）
-#   - 不 push_frame = 吞掉这个 frame（不让 "reset" 进入 LLM）
-#   - 用 context.set_messages([]) 清空，再 add_message 加系统提示，发 LLMRunFrame 触发新开场白
+# Key concepts:
+#   - A FrameProcessor can directly manipulate external objects (context)
+#   - Not calling push_frame swallows the frame (prevents "reset" from reaching the LLM)
+#   - Use context.set_messages([]) to clear, then add_message to restore the system prompt,
+#     and send LLMRunFrame to trigger a new opening greeting
 # ═══════════════════════════════════════════════════════════════════════════
 class ConversationResetter(FrameProcessor):
 
     def __init__(self, context: LLMContext, task_ref: list):
         super().__init__()
         self._context = context
-        # task_ref 是一个列表 [task]，用来间接引用 task（避免循环引用）
+        # task_ref is a list [task] used to indirectly reference the task (avoids circular references)
         self._task_ref = task_ref
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -153,7 +156,7 @@ class ConversationResetter(FrameProcessor):
 
         if isinstance(frame, TranscriptionFrame):
             if "reset" in frame.text.lower():
-                # 清空对话历史，只保留系统指令
+                # Clear the conversation history, keeping only the system instruction
                 self._context.set_messages([])
                 self._context.add_message({
                     "role": "developer",
@@ -161,19 +164,19 @@ class ConversationResetter(FrameProcessor):
                 })
                 print("\n[System] 🔄 Conversation reset!")
 
-                # 触发 LLM 立刻执行（说新的开场白）
+                # Trigger the LLM to run immediately (deliver a new opening greeting)
                 task = self._task_ref[0]
                 if task:
                     await task.queue_frames([LLMRunFrame()])
 
-                # 吞掉这个 TranscriptionFrame，不让 "reset" 进 LLM context
+                # Swallow this TranscriptionFrame so "reset" never enters the LLM context
                 return
 
         await self.push_frame(frame, direction)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 主程序
+# Main program
 # ═══════════════════════════════════════════════════════════════════════════
 async def main():
     transport = LocalAudioTransport(
@@ -202,25 +205,25 @@ async def main():
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
     )
 
-    # task_ref 用列表包装，让 ConversationResetter 能在初始化后引用 task
+    # task_ref wraps the task in a list so ConversationResetter can reference it after initialization
     task_ref = [None]
 
-    # 实例化自定义处理器
+    # Instantiate the custom processors
     transcription_printer = TranscriptionPrinter()
     resetter = ConversationResetter(context, task_ref)
     conversation_logger = ConversationLogger("conversation_log.json")
 
-    # Pipeline 数据流：
+    # Pipeline data flow:
     #   mic → stt → TranscriptionPrinter → ConversationResetter → user_agg
     #       → llm → ConversationLogger → tts → speaker → assistant_agg
     pipeline = Pipeline([
         transport.input(),
         stt,
-        transcription_printer,   # ← Processor 1: 打印转录
-        resetter,                # ← Processor 3: 检测 "reset" 命令
+        transcription_printer,   # ← Processor 1: print transcription
+        resetter,                # ← Processor 3: detect "reset" command
         user_aggregator,
         llm,
-        conversation_logger,     # ← Processor 2: 记录 bot 回复
+        conversation_logger,     # ← Processor 2: log bot replies
         tts,
         transport.output(),
         assistant_aggregator,
@@ -230,7 +233,7 @@ async def main():
         pipeline,
         params=PipelineParams(allow_interruptions=False),
     )
-    task_ref[0] = task  # 让 ConversationResetter 能访问 task
+    task_ref[0] = task  # allow ConversationResetter to access task
 
     context.add_message({
         "role": "developer",

@@ -1,19 +1,19 @@
 """
-Step 1 — 最简单的 Pipecat 示例
+Step 1 — Simplest Pipecat Example
 ================================
-只需要 ElevenLabs API key。
-运行后，电脑喇叭会说一句话，然后程序结束。
+Only an ElevenLabs API key is required.
+After running, your computer's speaker will say one sentence, then the program exits.
 
-目的：理解三个最核心的概念
-    1. Pipeline  - 处理器的链条
-    2. Frame     - 数据在链条里的"容器"（TTSSpeakFrame, EndFrame）
-    3. Transport - 音频怎么出去（LocalAudioTransport = 本地喇叭）
+Goal: understand the three most fundamental concepts
+    1. Pipeline  - a chain of processors
+    2. Frame     - the "container" for data flowing through the chain (TTSSpeakFrame, EndFrame)
+    3. Transport - how audio gets out (LocalAudioTransport = local speakers)
 
-安装依赖：
+Install dependencies:
     pip install "pipecat-ai[local,elevenlabs]" python-dotenv loguru
 
-配置：
-    复制 .env.example 为 .env，填入 ELEVENLABS_API_KEY
+Configuration:
+    Copy .env.example to .env and fill in ELEVENLABS_API_KEY
 """
 
 import asyncio
@@ -33,68 +33,68 @@ from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransp
 
 load_dotenv()
 
-# 把 loguru 日志输出到 stderr，级别 INFO（不会太吵）
+# Route loguru log output to stderr at INFO level (not too noisy)
 logger.remove(0)
 logger.add(sys.stderr, level="INFO")
 
 
 async def main():
     # ── 1. Transport ──────────────────────────────────────────────────────
-    # Transport 负责音频怎么进来（input）、怎么出去（output）
-    # LocalAudioTransport = 用电脑的麦克风和喇叭
-    # 这里只开 audio_out（输出），因为我们只需要说话，不需要听
+    # Transport handles how audio comes in (input) and goes out (output)
+    # LocalAudioTransport = uses the computer's microphone and speakers
+    # Only audio_out is enabled here because we only need to speak, not listen
     transport = LocalAudioTransport(
         LocalAudioTransportParams(audio_out_enabled=True)
     )
 
     # ── 2. TTS Service ────────────────────────────────────────────────────
-    # TTS = Text-to-Speech，负责把文字变成语音音频
-    # 它接收 TTSSpeakFrame（文字），输出 AudioRawFrame（音频）
-    # tts = CartesiaTTSService(                                                                                                                 
-    #   api_key=os.environ["CARTESIA_API_KEY"],                                                                                               
-    #   settings=CartesiaTTSService.Settings(                                                                                                 
-    #   voice="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady 声音                                                        
-    # ),      
+    # TTS = Text-to-Speech, responsible for converting text into audio
+    # It receives TTSSpeakFrame (text) and outputs AudioRawFrame (audio)
+    # tts = CartesiaTTSService(
+    #   api_key=os.environ["CARTESIA_API_KEY"],
+    #   settings=CartesiaTTSService.Settings(
+    #   voice="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady voice
+    # ),
     tts = ElevenLabsTTSService(
         api_key=os.environ["ELEVENLABS_API_KEY"],
-        # voice_id 可以在 ElevenLabs 网站的 Voice Library 找到
-        # 这是内建的 "Rachel" 声音（免费账号可用）
-        settings=ElevenLabsTTSService.Settings(voice="21m00Tcm4TlvDq8ikWAM") 
+        # voice_id can be found in the Voice Library on the ElevenLabs website
+        # This is the built-in "Rachel" voice (available on free accounts)
+        settings=ElevenLabsTTSService.Settings(voice="21m00Tcm4TlvDq8ikWAM")
     )
 
     # ── 3. Pipeline ───────────────────────────────────────────────────────
-    # Pipeline 把处理器按顺序串起来
-    # 数据流向：tts → transport.output()
+    # Pipeline chains processors together in order
+    # Data flow: tts → transport.output()
     #
-    # 当 TTSSpeakFrame("Hello!") 进入 pipeline：
-    #   tts 处理 → 生成 AudioRawFrame
-    #   transport.output() 接收 → 播放出来
+    # When TTSSpeakFrame("Hello!") enters the pipeline:
+    #   tts processes it → generates AudioRawFrame
+    #   transport.output() receives it → plays it back
     pipeline = Pipeline([tts, transport.output()])
 
     # ── 4. PipelineTask ───────────────────────────────────────────────────
-    # PipelineTask 把 pipeline 包装成一个可以运行的异步任务
+    # PipelineTask wraps the pipeline into a runnable async task
     task = PipelineTask(pipeline)
 
-    # ── 5. 发送 Frame ─────────────────────────────────────────────────────
+    # ── 5. Send Frames ────────────────────────────────────────────────────
     async def say_something():
-        # 等 1 秒让 pipeline 完全初始化
+        # Wait 1 second for the pipeline to fully initialize
         await asyncio.sleep(1)
 
-        # queue_frames 把 frame 放入 pipeline 的处理队列
-        # TTSSpeakFrame：让 TTS 读出这段文字
-        # EndFrame：告诉 pipeline "任务完成，可以结束了"
+        # queue_frames puts frames into the pipeline's processing queue
+        # TTSSpeakFrame: instructs TTS to speak this text
+        # EndFrame: tells the pipeline "task complete, you can shut down now"
         await task.queue_frames([
             TTSSpeakFrame("Hello! I am your Pipecat voice agent. This is Step 1."),
             EndFrame(),
         ])
 
     # ── 6. PipelineRunner ─────────────────────────────────────────────────
-    # PipelineRunner 运行 task，处理 asyncio 事件循环
-    # Windows 上 handle_sigint 要设为 False（不然报错）
+    # PipelineRunner runs the task and manages the asyncio event loop
+    # On Windows, handle_sigint must be False (otherwise it raises an error)
     runner = PipelineRunner(handle_sigint=False if sys.platform == "win32" else True)
 
-    # asyncio.gather 同时运行 runner 和 say_something
-    # runner.run(task) 会一直跑，直到收到 EndFrame 才结束
+    # asyncio.gather runs runner and say_something concurrently
+    # runner.run(task) keeps running until it receives EndFrame, then exits
     await asyncio.gather(runner.run(task), say_something())
 
 

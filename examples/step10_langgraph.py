@@ -1,31 +1,32 @@
 """
-Step 10 — LangGraph 集成（兼容，不是不兼容）
-=============================================
-LangGraph 和 Pipecat 是完全兼容的。
-集成方式：写一个自定义 FrameProcessor 作为桥接，替换掉 pipeline 里的 LLM service。
+Step 10 — LangGraph Integration (Compatible, Not Incompatible)
+==============================================================
+LangGraph and Pipecat are fully compatible.
+Integration approach: write a custom FrameProcessor as a bridge to replace
+the LLM service in the pipeline.
 
-你会学到：
-    1. 为什么 Pipecat + LangGraph 是兼容的
-    2. LangGraphProcessor — 桥接 FrameProcessor 的写法
-    3. 关键帧协议：LLMContextFrame → LLMFullResponseStartFrame → LLMTextFrame × N → LLMFullResponseEndFrame
-    4. Pipecat messages（OpenAI dict）和 LangGraph messages（LangChain Message 对象）之间的转换
-    5. LangGraph graph 如何管理自己的对话 state
+What you will learn:
+    1. Why Pipecat + LangGraph are compatible
+    2. LangGraphProcessor — how to write a bridging FrameProcessor
+    3. Key frame protocol: LLMContextFrame → LLMFullResponseStartFrame → LLMTextFrame × N → LLMFullResponseEndFrame
+    4. Converting between Pipecat messages (OpenAI dicts) and LangGraph messages (LangChain Message objects)
+    5. How a LangGraph graph manages its own conversation state
 
-为什么要用 LangGraph 而不是直接用 Pipecat 内建 LLM service？
-    - 你已经有一个 LangGraph workflow（有复杂的 conditional edges、tools、memory）
-    - 想给它加上实时语音界面，而不重写整个 agent 逻辑
-    - 需要 LangGraph 的 checkpointing、human-in-the-loop 等特性
+Why use LangGraph instead of Pipecat's built-in LLM service?
+    - You already have a LangGraph workflow (with complex conditional edges, tools, memory)
+    - You want to add a real-time voice interface without rewriting the entire agent logic
+    - You need LangGraph features like checkpointing and human-in-the-loop
 
-局限：
-    - 对话历史由 LangGraph MessagesState 管理，不用 Pipecat LLMContext
-    - 如果需要 Pipecat 的 context summarization 或 function calling，需要额外适配
-    - 不支持 streaming interruption（LangGraph 调用是原子的）
+Limitations:
+    - Conversation history is managed by LangGraph MessagesState, not Pipecat LLMContext
+    - If you need Pipecat's context summarization or function calling, additional adaptation is required
+    - Streaming interruption is not supported (LangGraph invocations are atomic)
 
-安装依赖：
+Install dependencies:
     uv add langgraph langchain-openai langchain-core
-    （不需要新的 Pipecat extras）
+    (No new Pipecat extras required)
 
-所需 API key：DEEPGRAM + OPENAI + ELEVENLABS
+Required API keys: DEEPGRAM + OPENAI + ELEVENLABS
 """
 
 import asyncio
@@ -73,25 +74,25 @@ logger.add(sys.stderr, level="WARNING")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 1. LangGraph Graph 定义
+# 1. LangGraph Graph Definition
 #
-# 这里是一个最简单的 chatbot graph：
-#   用户输入 → chatbot 节点（调用 LLM）→ 结束
+# This is the simplest possible chatbot graph:
+#   user input → chatbot node (calls LLM) → end
 #
-# 真实场景里这里可以是任何复杂的 LangGraph workflow：
-#   - 有条件边（conditional edges）
-#   - 多个节点（retrieval、tools、routing）
-#   - 人工审核（human-in-the-loop）
-#   - 持久化记忆（checkpointing）
+# In a real scenario this could be any complex LangGraph workflow:
+#   - Conditional edges
+#   - Multiple nodes (retrieval, tools, routing)
+#   - Human-in-the-loop review
+#   - Persistent memory (checkpointing)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class GraphState(TypedDict):
-    # add_messages 是 LangGraph 内建的 reducer，自动把新消息追加到列表
+    # add_messages is LangGraph's built-in reducer that automatically appends new messages to the list
     messages: Annotated[list, add_messages]
 
 
 def build_langgraph() -> "CompiledStateGraph":
-    """构建 LangGraph graph"""
+    """Build the LangGraph graph"""
     model = ChatOpenAI(
         model="gpt-4o-mini",
         api_key=os.environ["OPENAI_API_KEY"],
@@ -99,7 +100,7 @@ def build_langgraph() -> "CompiledStateGraph":
     )
 
     def chatbot_node(state: GraphState):
-        """调用 LLM，返回回复"""
+        """Call the LLM and return the response"""
         response = model.invoke(state["messages"])
         return {"messages": [response]}
 
@@ -111,27 +112,29 @@ def build_langgraph() -> "CompiledStateGraph":
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 2. LangGraphProcessor — 核心桥接类
+# 2. LangGraphProcessor — Core Bridge Class
 #
-# 这个类遵循 Pipecat 官方的框架集成模式（和内建的 LangchainProcessor 相同）：
+# This class follows the official Pipecat framework integration pattern
+# (the same pattern used by the built-in LangchainProcessor):
 #
-# 输入：LLMContextFrame（Pipecat 的对话历史）
-# 输出：LLMFullResponseStartFrame → LLMTextFrame × N → LLMFullResponseEndFrame
+# Input:  LLMContextFrame (Pipecat conversation history)
+# Output: LLMFullResponseStartFrame → LLMTextFrame × N → LLMFullResponseEndFrame
 #
-# 关键帧要求（官方 Discord staff 确认）：
-#   - 必须用 LLMTextFrame，不能用 TextFrame
-#     LLMTextFrame 的 includes_inter_frame_spaces=True，TTS aggregator 需要这个
-#   - 必须推送 LLMFullResponseEndFrame，否则 TTS 不会 flush 最后一句话
-#   - LLMFullResponseStartFrame 让 transport 知道 bot 开始说话（影响 VAD 和中断逻辑）
+# Key frame requirements (confirmed by official Discord staff):
+#   - Must use LLMTextFrame, not TextFrame
+#     LLMTextFrame has includes_inter_frame_spaces=True, which the TTS aggregator needs
+#   - Must push LLMFullResponseEndFrame, otherwise TTS will not flush the last sentence
+#   - LLMFullResponseStartFrame lets the transport know the bot has started speaking
+#     (affects VAD and interruption logic)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class LangGraphProcessor(FrameProcessor):
-    """把 LangGraph graph 嵌入 Pipecat pipeline 的桥接处理器"""
+    """Bridge processor that embeds a LangGraph graph into a Pipecat pipeline"""
 
     def __init__(self, graph):
         super().__init__()
         self._graph = graph
-        # LangGraph 自己管理对话历史（不用 Pipecat 的 LLMContext）
+        # LangGraph manages its own conversation history (not Pipecat's LLMContext)
         self._lg_messages: list = [
             SystemMessage(content=(
                 "You are a helpful voice assistant. "
@@ -144,8 +147,8 @@ class LangGraphProcessor(FrameProcessor):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, LLMContextFrame):
-            # LLMContextFrame 里的 messages 是 Pipecat 的格式（OpenAI dict list）
-            # 我们只取最新一条用户消息，交给 LangGraph 处理
+            # Messages inside LLMContextFrame are in Pipecat format (OpenAI dict list).
+            # We extract only the latest user message and hand it to LangGraph.
             pipecat_messages = frame.context.get_messages()
             last_message = pipecat_messages[-1] if pipecat_messages else None
 
@@ -156,25 +159,26 @@ class LangGraphProcessor(FrameProcessor):
             role = last_message.get("role", "")
             content = last_message.get("content", "")
 
-            # 只处理用户消息
+            # Only process user messages
             if role not in ("user", "human") or not content.strip():
                 await self.push_frame(frame, direction)
                 return
 
             logger.info(f"LangGraphProcessor: user said: {content!r}")
 
-            # 把用户消息加入 LangGraph 的消息历史
+            # Add the user message to LangGraph's message history
             self._lg_messages.append(HumanMessage(content=content.strip()))
 
-            # ── 推送帧序列：告诉 Pipecat bot 开始回复 ──────────────────────
+            # ── Push frame sequence: tell Pipecat the bot is starting its reply ──
             await self.push_frame(LLMFullResponseStartFrame())
 
             try:
-                # 调用 LangGraph graph，获取完整回复
-                # 注意：这里用 ainvoke（非流式），因为 LangGraph streaming 需要额外配置
+                # Invoke the LangGraph graph to get the full response.
+                # Note: using ainvoke (non-streaming) here because LangGraph streaming
+                # requires additional configuration.
                 result = await self._graph.ainvoke({"messages": self._lg_messages})
 
-                # 从 result 里取出 AI 的回复
+                # Extract the AI reply from the result
                 response_messages = result.get("messages", [])
                 ai_message = None
                 for msg in reversed(response_messages):
@@ -186,35 +190,35 @@ class LangGraphProcessor(FrameProcessor):
                     response_text = ai_message.content
                     logger.info(f"LangGraphProcessor: LangGraph replied: {response_text!r}")
 
-                    # 把 AI 回复加入 LangGraph 的历史，下轮对话用
+                    # Add the AI reply to LangGraph's history for use in the next turn
                     self._lg_messages.append(ai_message)
 
-                    # 把回复分成小块推送（模拟 streaming）
-                    # 真实场景里可以用 graph.astream() 实现真正的 token streaming
+                    # Push the response in small chunks (simulates streaming).
+                    # In a real scenario you can use graph.astream() for true token streaming.
                     words = response_text.split()
-                    chunk_size = 5  # 每次推 5 个词
+                    chunk_size = 5  # push 5 words at a time
                     for i in range(0, len(words), chunk_size):
                         chunk = " ".join(words[i:i + chunk_size])
-                        # 在 chunk 末尾加空格，确保 TTS aggregator 正确拼接句子
+                        # Add a trailing space so the TTS aggregator joins sentences correctly
                         await self.push_frame(LLMTextFrame(chunk + " "))
 
             except Exception as e:
                 logger.error(f"LangGraphProcessor error: {e}")
             finally:
-                # ── 必须推送 EndFrame，否则 TTS 不会 flush 最后一句 ──────────
+                # ── Must push EndFrame, otherwise TTS will not flush the last sentence ──
                 await self.push_frame(LLMFullResponseEndFrame())
 
         else:
-            # 所有其他 frame 直接透传
+            # Pass all other frames through unchanged
             await self.push_frame(frame, direction)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 3. 主程序
+# 3. Main Program
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def main():
-    # 构建 LangGraph graph
+    # Build the LangGraph graph
     graph = build_langgraph()
     logger.info("LangGraph graph compiled successfully")
 
@@ -232,11 +236,11 @@ async def main():
         settings=ElevenLabsTTSService.Settings(voice="21m00Tcm4TlvDq8ikWAM"),
     )
 
-    # ── LangGraphProcessor 替代 OpenAILLMService ──────────────────────────
+    # ── LangGraphProcessor replaces OpenAILLMService ──────────────────────
     langgraph_processor = LangGraphProcessor(graph)
 
-    # Pipecat 的 context 在这里只用来传递用户消息给 LangGraphProcessor
-    # 对话历史由 LangGraph 的 MessagesState 自己管理
+    # Pipecat's context here is used only to pass user messages to LangGraphProcessor.
+    # Conversation history is managed entirely by LangGraph's MessagesState.
     context = LLMContext()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
@@ -246,12 +250,12 @@ async def main():
         ),
     )
 
-    # Pipeline：用 LangGraphProcessor 替换了 OpenAILLMService
+    # Pipeline: LangGraphProcessor replaces OpenAILLMService
     pipeline = Pipeline([
         transport.input(),
         stt,
         user_aggregator,
-        langgraph_processor,   # ← LangGraph 在这里
+        langgraph_processor,   # ← LangGraph runs here
         tts,
         transport.output(),
         assistant_aggregator,
@@ -259,7 +263,7 @@ async def main():
 
     task = PipelineTask(pipeline, params=PipelineParams())
 
-    # 启动时让 agent 先说话（直接加消息到 LangGraph 历史，然后触发）
+    # On startup, have the agent speak first (add a message directly to LangGraph history, then trigger)
     langgraph_processor._lg_messages.append(
         HumanMessage(content="Please greet the user briefly.")
     )
@@ -269,7 +273,7 @@ async def main():
 
     print("=" * 55)
     print(" LangGraph + Pipecat Voice Agent")
-    print(" LangGraph graph: simple chatbot (可换成任何 graph)")
+    print(" LangGraph graph: simple chatbot (swap in any graph)")
     print(" Try: 'What is LangGraph?' or 'Tell me a joke'")
     print("=" * 55)
 

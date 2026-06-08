@@ -1,30 +1,31 @@
 """
-Step 11 — Observer 系统（非侵入式监控）
-=========================================
-Observer 让你监控 pipeline 里所有 frame 的流动，不需要插入处理器，不影响数据流。
+Step 11 — Observer System (Non-Intrusive Monitoring)
+=====================================================
+Observers let you monitor the flow of all frames through a pipeline without
+inserting processors or affecting the data stream.
 
-Observer vs FrameProcessor 的根本区别：
-    FrameProcessor = IN pipeline，frame 必须经过，可以修改/过滤
-    BaseObserver   = OUTSIDE pipeline，被动旁观所有 frame，不影响数据
+Core difference between Observer and FrameProcessor:
+    FrameProcessor = IN the pipeline; frames must pass through it and can be modified/filtered
+    BaseObserver   = OUTSIDE the pipeline; passively watches all frames without affecting data
 
-你会学到：
-    1. 内建 Observer：LLMLogObserver, TranscriptionLogObserver, MetricsLogObserver
-    2. BaseObserver 的三个 hook：on_push_frame, on_process_frame, on_pipeline_started
-    3. FramePushed dataclass：source, destination, frame, direction, timestamp
-    4. MetricsFrame 里有哪些数据：TTFB, processing time, token usage, TTS chars
-    5. 写自定义 Observer：实时收集 session 统计并在结束时汇总打印
-    6. 观察 BotStartedSpeakingFrame / BotStoppedSpeakingFrame 来测量 bot 说话时长
+What you will learn:
+    1. Built-in observers: LLMLogObserver, TranscriptionLogObserver, MetricsLogObserver
+    2. The three hooks of BaseObserver: on_push_frame, on_process_frame, on_pipeline_started
+    3. FramePushed dataclass: source, destination, frame, direction, timestamp
+    4. What data lives inside MetricsFrame: TTFB, processing time, token usage, TTS chars
+    5. Writing a custom Observer: collect session stats in real time and print a summary at the end
+    6. Observing BotStartedSpeakingFrame / BotStoppedSpeakingFrame to measure bot speaking duration
 
-Pipeline 结构和 step2 完全相同，只在 PipelineTask 里加 observers：
+Pipeline structure is identical to step2; only the PipelineTask gains observers:
     transport.input() → stt → user_aggregator → llm → tts → transport.output() → assistant_aggregator
 
-关键：enable_metrics=True 和 enable_usage_metrics=True 必须开启，
-      否则 MetricsFrame 不会发出，MetricsLogObserver 收不到数据。
+Key: enable_metrics=True and enable_usage_metrics=True must both be enabled,
+     otherwise MetricsFrame will not be emitted and MetricsLogObserver receives no data.
 
-安装依赖：（和 step2 一样）
+Install dependencies: (same as step2)
     uv add "pipecat-ai[local,deepgram,openai,elevenlabs,silero]" python-dotenv loguru
 
-所需 API key：DEEPGRAM + OPENAI + ELEVENLABS
+Required API keys: DEEPGRAM + OPENAI + ELEVENLABS
 """
 
 import asyncio
@@ -75,37 +76,37 @@ from pipecat.turns.user_mute import AlwaysUserMuteStrategy
 
 load_dotenv()
 
-# 把 loguru 设为 DEBUG，才能看到内建 observer 的输出
+# Set loguru to DEBUG so the built-in observer output is visible
 logger.remove(0)
 logger.add(sys.stderr, level="DEBUG", format="<level>{level}</level> | {message}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 自定义 Observer：Session 统计收集器
+# Custom Observer: Session Statistics Collector
 #
-# 这个 observer 示范了：
-# - 如何在 on_push_frame 里筛选特定 frame 类型
-# - 如何追踪有状态的数据（bot 说话开始时间、累计指标）
-# - 如何在 on_pipeline_started 里做初始化
-# - 如何在 session 结束后汇总打印报告
+# This observer demonstrates:
+# - How to filter for specific frame types inside on_push_frame
+# - How to track stateful data (bot speaking start time, cumulative metrics)
+# - How to perform initialization inside on_pipeline_started
+# - How to print a summary report after the session ends
 # ═══════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class SessionStats:
-    """一次完整对话 session 的统计数据"""
+    """Statistics for one complete conversation session."""
     start_time: float = field(default_factory=lambda: asyncio.get_event_loop().time())
-    turns: int = 0                      # 用户说话的轮次
-    transcriptions: list[str] = field(default_factory=list)  # 所有转录文字
+    turns: int = 0                      # Number of user speaking turns
+    transcriptions: list[str] = field(default_factory=list)  # All transcribed text
 
-    total_prompt_tokens: int = 0        # LLM 总 prompt token
-    total_completion_tokens: int = 0    # LLM 总 completion token
-    total_tts_chars: int = 0            # TTS 消耗总字符数
+    total_prompt_tokens: int = 0        # Total LLM prompt tokens
+    total_completion_tokens: int = 0    # Total LLM completion tokens
+    total_tts_chars: int = 0            # Total characters consumed by TTS
 
-    ttfb_values: list[float] = field(default_factory=list)  # 所有 TTFB（秒）
+    ttfb_values: list[float] = field(default_factory=list)  # All TTFB values (seconds)
     processing_times: dict = field(default_factory=lambda: defaultdict(list))
 
     bot_speaking_durations: list[float] = field(default_factory=list)
-    _bot_speaking_start: float | None = None  # bot 开始说话的时间戳
+    _bot_speaking_start: float | None = None  # Timestamp when the bot started speaking
 
     def record_bot_started(self, timestamp_ns: int):
         self._bot_speaking_start = timestamp_ns / 1e9
@@ -157,14 +158,14 @@ class SessionStats:
 
 class SessionStatsObserver(BaseObserver):
     """
-    收集整个对话 session 的统计数据。
+    Collects statistics for the entire conversation session.
 
-    on_push_frame 会被 pipeline 里每一次 frame 传递都调用到。
-    data.source    = 推送这个 frame 的 processor
-    data.destination = 接收这个 frame 的 processor
-    data.frame     = frame 本身
-    data.direction = DOWNSTREAM 或 UPSTREAM
-    data.timestamp = 纳秒时间戳（pipeline 内部时钟）
+    on_push_frame is called for every frame transfer inside the pipeline.
+    data.source      = the processor that pushed this frame
+    data.destination = the processor that receives this frame
+    data.frame       = the frame itself
+    data.direction   = DOWNSTREAM or UPSTREAM
+    data.timestamp   = nanosecond timestamp (pipeline internal clock)
     """
 
     def __init__(self):
@@ -172,33 +173,32 @@ class SessionStatsObserver(BaseObserver):
         self._stats = SessionStats()
 
     async def on_pipeline_started(self):
-        """Pipeline 完全启动后调用（StartFrame 经过所有 processor 后）"""
+        """Called after the pipeline has fully started (StartFrame has passed all processors)."""
         print("\n[Observer] Pipeline started — session tracking begins\n")
 
     async def on_push_frame(self, data: FramePushed):
         frame = data.frame
         ts = data.timestamp
 
-        # ── STT 转录 ─────────────────────────────────────────────────────
+        # ── STT transcription ────────────────────────────────────────────
         if isinstance(frame, TranscriptionFrame):
             self._stats.turns += 1
             self._stats.transcriptions.append(frame.text)
 
-        # ── Bot 说话时长 ──────────────────────────────────────────────────
+        # ── Bot speaking duration ─────────────────────────────────────────
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._stats.record_bot_started(ts)
 
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._stats.record_bot_stopped(ts)
 
-        # ── Metrics Frame：性能指标 ───────────────────────────────────────
-        # MetricsFrame 只在 enable_metrics=True 时才会出现
-        # 需要先 import MetricsFrame 才能 isinstance 检查
-        # 用 frame.__class__.__name__ 避免 import 噪音
+        # ── MetricsFrame: performance metrics ────────────────────────────
+        # MetricsFrame is only emitted when enable_metrics=True
+        # Use frame.__class__.__name__ to avoid a noisy import
         elif frame.__class__.__name__ == "MetricsFrame":
             for d in frame.data:
                 if isinstance(d, TTFBMetricsData):
-                    # TTFB = Time To First Byte，以秒为单位
+                    # TTFB = Time To First Byte, in seconds
                     self._stats.ttfb_values.append(d.value)
 
                 elif isinstance(d, LLMUsageMetricsData):
@@ -217,7 +217,7 @@ class SessionStatsObserver(BaseObserver):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 主程序
+# Main
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def main():
@@ -253,7 +253,7 @@ async def main():
         ),
     )
 
-    # Pipeline 和 step2 完全一样，没有任何改动
+    # Pipeline is identical to step2 — no changes whatsoever
     pipeline = Pipeline([
         transport.input(),
         stt,
@@ -264,28 +264,28 @@ async def main():
         assistant_aggregator,
     ])
 
-    # ── 实例化自定义 observer ─────────────────────────────────────────────
+    # ── Instantiate the custom observer ──────────────────────────────────
     stats_observer = SessionStatsObserver()
 
-    # ── 所有 observer 都在这里注册，不插入 pipeline ──────────────────────
+    # ── All observers are registered here; none are inserted into the pipeline ──
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
-            enable_metrics=True,          # 必须开启 → MetricsFrame 才会发出
-            enable_usage_metrics=True,    # 必须开启 → LLMUsageMetricsData / TTSUsageMetricsData
+            enable_metrics=True,          # Required → MetricsFrame will be emitted
+            enable_usage_metrics=True,    # Required → LLMUsageMetricsData / TTSUsageMetricsData
         ),
         observers=[
-            # ── 内建 observers ─────────────────────────────────────────
-            TranscriptionLogObserver(),   # 💬 打印每次 STT 转录结果
-            LLMLogObserver(),             # 🧠 打印 LLM 生成的 token（流式）
-            MetricsLogObserver(           # 📊 打印性能指标
+            # ── Built-in observers ─────────────────────────────────────
+            TranscriptionLogObserver(),   # 💬 Print each STT transcription result
+            LLMLogObserver(),             # 🧠 Print LLM-generated tokens (streaming)
+            MetricsLogObserver(           # 📊 Print performance metrics
                 include_metrics={
-                    TTFBMetricsData,       # 只看 TTFB
-                    LLMUsageMetricsData,   # 和 token 用量
+                    TTFBMetricsData,       # Show TTFB only
+                    LLMUsageMetricsData,   # and token usage
                 }
             ),
-            # ── 自定义 observer ────────────────────────────────────────
-            stats_observer,               # 📈 收集 session 统计
+            # ── Custom observer ────────────────────────────────────────
+            stats_observer,               # 📈 Collect session statistics
         ],
     )
 
@@ -299,17 +299,17 @@ async def main():
 
     print("=" * 55)
     print(" Observer Demo")
-    print(" 你会在终端看到：")
-    print("   💬 STT 转录（TranscriptionLogObserver）")
-    print("   🧠 LLM 生成 token（LLMLogObserver）")
-    print("   📊 TTFB 和 token 用量（MetricsLogObserver）")
-    print(" Ctrl+C 结束后会打印 Session Summary")
+    print(" You will see in the terminal:")
+    print("   💬 STT transcriptions (TranscriptionLogObserver)")
+    print("   🧠 LLM-generated tokens (LLMLogObserver)")
+    print("   📊 TTFB and token usage (MetricsLogObserver)")
+    print(" Press Ctrl+C to stop — a Session Summary will be printed")
     print("=" * 55)
 
     try:
         await runner.run(task)
     finally:
-        # Ctrl+C 或 pipeline 结束后打印汇总
+        # Print the summary after Ctrl+C or pipeline completion
         stats_observer.print_summary()
 
 

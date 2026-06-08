@@ -1,36 +1,36 @@
 """
-Step 12 — 每个阶段的 Duration 和 Processing Time
-=================================================
-专注于用 Observer 测量每一个 pipeline 阶段的性能指标。
+Step 12 — Duration and Processing Time Per Pipeline Stage
+==========================================================
+Focused on using an Observer to measure performance metrics for each pipeline stage.
 
-你会学到：
-    1. MetricsData.processor — 每条指标都标注了来自哪个 service（Deepgram/OpenAI/ElevenLabs）
-    2. 三种核心延迟指标的定义：
-       - TTFB（Time To First Byte）：从请求发出到第一个输出的时间
-       - Processing Time：整个 service 从开始到完成的总时间
-       - Text Aggregation：从第一个 LLM token 到第一个完整句子的等待时间（TTS 的"等第一句"延迟）
-    3. 用 BotStartedSpeakingFrame 时间戳计算端到端（E2E）延迟
-    4. 每一轮对话结束后，打印该轮的完整 stage breakdown 表格
+You will learn:
+    1. MetricsData.processor — each metric is tagged with the service it came from (Deepgram/OpenAI/ElevenLabs)
+    2. The definitions of three core latency metrics:
+       - TTFB (Time To First Byte): time from request sent to first output received
+       - Processing Time: total time for an entire service from start to completion
+       - Text Aggregation: time from the first LLM token to the first complete sentence (the "wait for first sentence" latency for TTS)
+    3. Using BotStartedSpeakingFrame timestamps to calculate end-to-end (E2E) latency
+    4. After each conversation turn, print a complete stage breakdown table for that turn
 
-Pipeline 各阶段的指标含义：
+Metric meanings for each pipeline stage:
 
   [STT - Deepgram]
-    TTFB          = 音频进来 → 第一个转录字出来（网络 + 模型首字时间）
-    ProcessingTime = 整段语音转录完毕的总时间
+    TTFB          = audio in → first transcribed word out (network + model first-word time)
+    ProcessingTime = total time to transcribe the entire audio segment
 
   [LLM - OpenAI]
-    TTFB          = context 发送 → 第一个 token 出来（网络 + 模型首 token 时间）
-    ProcessingTime = 整个 LLM 回复生成完毕的总时间（通常 = TTFB + 生成时间）
+    TTFB          = context sent → first token out (network + model first-token time)
+    ProcessingTime = total time for the entire LLM response to be generated (usually = TTFB + generation time)
 
   [TTS - ElevenLabs]
-    TTFB          = 第一句文字进来 → 第一段音频出来（合成首音节时间）
-    ProcessingTime = 合成引擎的内部处理时间（通常很短，因为是流式的）
-    TextAggregation = 第一个 LLM token 出来 → 凑够第一个完整句子（句子积累等待时间）
+    TTFB          = first sentence text in → first audio chunk out (synthesis first-syllable time)
+    ProcessingTime = internal processing time of the synthesis engine (usually very short due to streaming)
+    TextAggregation = first LLM token out → enough text accumulated for the first complete sentence (sentence accumulation wait time)
 
-  E2E Latency    = 用户停止说话 → Bot 开始播音（这是用户实际感受到的延迟）
-                   ≈ STT 收尾 + LLM TTFB + TTS TTFB + TextAggregation
+  E2E Latency    = user stops speaking → bot starts playing audio (latency as actually perceived by the user)
+                   ≈ STT tail + LLM TTFB + TTS TTFB + TextAggregation
 
-所需 API key：DEEPGRAM + OPENAI + ELEVENLABS
+Required API keys: DEEPGRAM + OPENAI + ELEVENLABS
 """
 
 import asyncio
@@ -77,11 +77,11 @@ from pipecat.turns.user_mute import AlwaysUserMuteStrategy
 
 load_dotenv()
 logger.remove(0)
-logger.add(sys.stderr, level="WARNING")  # 只看我们自己打印的内容
+logger.add(sys.stderr, level="WARNING")  # Only show output we print ourselves
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 数据结构：一轮对话的指标快照
+# Data structure: metrics snapshot for a single conversation turn
 # ═══════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -89,29 +89,29 @@ class TurnMetrics:
     turn_number: int
     transcription: str = ""
 
-    # 各 stage 的 TTFB（秒）
+    # TTFB for each stage (seconds)
     stt_ttfb: float | None = None
     llm_ttfb: float | None = None
     tts_ttfb: float | None = None
 
-    # 各 stage 的 processing time（秒）
+    # Processing time for each stage (seconds)
     stt_processing: float | None = None
     llm_processing: float | None = None
     tts_processing: float | None = None
 
-    # TTS 特有：从第一个 LLM token 到第一个完整句子的等待时间
+    # TTS-specific: time from the first LLM token to the first complete sentence
     tts_text_aggregation: float | None = None
 
-    # LLM token 用量
+    # LLM token usage
     llm_prompt_tokens: int = 0
     llm_completion_tokens: int = 0
 
-    # TTS 字符数
+    # TTS character count
     tts_chars: int = 0
 
-    # E2E 延迟（用户停止说话 → bot 开始播音）
-    user_stopped_ts: float | None = None    # 纳秒时间戳
-    bot_started_ts: float | None = None     # 纳秒时间戳
+    # E2E latency (user stops speaking → bot starts playing audio)
+    user_stopped_ts: float | None = None    # nanosecond timestamp
+    bot_started_ts: float | None = None     # nanosecond timestamp
 
     @property
     def e2e_latency_ms(self) -> float | None:
@@ -150,7 +150,7 @@ class TurnMetrics:
             f" {'TTS (ElevenLabs)':<18} {ms(self.tts_ttfb):>10}  {ms(self.tts_processing):>12}{char_note}"
         )
 
-        # Text aggregation（TTS 等第一句的时间）
+        # Text aggregation (time TTS waits for the first sentence)
         if self.tts_text_aggregation is not None:
             print(
                 f" {'  └ text aggregation':<18} {'':>10}  {ms(self.tts_text_aggregation):>12}"
@@ -168,15 +168,15 @@ class TurnMetrics:
 
 class PerStageMetricsObserver(BaseObserver):
     """
-    每一轮对话结束时，打印该轮的 stage breakdown 表格。
+    At the end of each conversation turn, prints the stage breakdown table for that turn.
 
-    工作原理：
-    1. 监听 MetricsFrame → 提取每个 service 的 TTFB / Processing 指标
-       MetricsData.processor 字段标识来源（如 "OpenAILLMService#0"）
-    2. 监听 UserStoppedSpeakingFrame → 记录用户停止说话的时间戳
-    3. 监听 BotStartedSpeakingFrame  → 记录 bot 开始播音的时间戳，计算 E2E
-    4. 监听 BotStoppedSpeakingFrame  → 一轮对话结束，打印表格，重置当前轮数据
-    5. 监听 TranscriptionFrame       → 记录转录文字（用于表格标题）
+    How it works:
+    1. Listens for MetricsFrame → extracts TTFB / Processing metrics for each service
+       MetricsData.processor field identifies the source (e.g. "OpenAILLMService#0")
+    2. Listens for UserStoppedSpeakingFrame → records the timestamp when the user stopped speaking
+    3. Listens for BotStartedSpeakingFrame  → records the timestamp when the bot starts playing audio, calculates E2E
+    4. Listens for BotStoppedSpeakingFrame  → one turn ends: prints the table, resets current-turn data
+    5. Listens for TranscriptionFrame       → records transcribed text (used as the table heading)
     """
 
     def __init__(self):
@@ -192,9 +192,9 @@ class PerStageMetricsObserver(BaseObserver):
 
     async def on_push_frame(self, data: FramePushed):
         frame = data.frame
-        ts = data.timestamp  # 纳秒
+        ts = data.timestamp  # nanoseconds
 
-        # ── E2E 时间戳 ────────────────────────────────────────────────────
+        # ── E2E timestamps ────────────────────────────────────────────────────
         if isinstance(frame, UserStoppedSpeakingFrame):
             self._ensure_current_turn()
             self._current.user_stopped_ts = ts
@@ -204,22 +204,22 @@ class PerStageMetricsObserver(BaseObserver):
                 self._current.bot_started_ts = ts
 
         elif isinstance(frame, BotStoppedSpeakingFrame):
-            # Bot 说完话 = 这一轮结束，打印表格
+            # Bot finished speaking = this turn is over, print the table
             if self._current:
                 self._session_turns.append(self._current)
                 self._current.print_table()
                 self._current = None
 
-        # ── 转录文字 ──────────────────────────────────────────────────────
+        # ── Transcription text ──────────────────────────────────────────────────────
         elif isinstance(frame, TranscriptionFrame):
             self._ensure_current_turn()
             self._current.transcription = frame.text
 
-        # ── MetricsFrame：从这里拿所有性能数据 ───────────────────────────
+        # ── MetricsFrame: all performance data comes from here ───────────────────────────
         elif isinstance(frame, MetricsFrame):
             self._ensure_current_turn()
             for d in frame.data:
-                p = d.processor.lower()  # 转小写，方便 contains 判断
+                p = d.processor.lower()  # lowercase for easy contains-check
 
                 # --- TTFB ---
                 if isinstance(d, TTFBMetricsData):
@@ -239,7 +239,7 @@ class PerStageMetricsObserver(BaseObserver):
                     elif "elevenlabs" in p or "tts" in p or "cartesia" in p:
                         self._current.tts_processing = d.value
 
-                # --- Text Aggregation（TTS 特有）---
+                # --- Text Aggregation (TTS-specific) ---
                 elif isinstance(d, TextAggregationMetricsData):
                     self._current.tts_text_aggregation = d.value
 
@@ -286,7 +286,7 @@ class PerStageMetricsObserver(BaseObserver):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 主程序
+# Main program
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def main():
@@ -335,8 +335,8 @@ async def main():
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
-            enable_metrics=True,          # 开启 → TTFBMetricsData, ProcessingMetricsData
-            enable_usage_metrics=True,    # 开启 → LLMUsageMetricsData, TTSUsageMetricsData
+            enable_metrics=True,          # enable → TTFBMetricsData, ProcessingMetricsData
+            enable_usage_metrics=True,    # enable → LLMUsageMetricsData, TTSUsageMetricsData
         ),
         observers=[metrics_observer],
     )
@@ -351,8 +351,8 @@ async def main():
 
     print("=" * 65)
     print(" Per-Stage Metrics Demo")
-    print(" 每轮对话结束后会打印该轮的 stage breakdown 表格")
-    print(" Ctrl+C 结束后会打印 session 平均值")
+    print(" A stage breakdown table for each turn will be printed after the turn ends")
+    print(" Press Ctrl+C to exit; session averages will be printed on exit")
     print("=" * 65)
 
     try:

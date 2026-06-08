@@ -1,17 +1,17 @@
 """
-Step 3 — Function Calling（工具调用）
-======================================
-在 step2 的基础上，给 agent 加上调用外部工具的能力。
-运行后可以问 agent "What's the weather in Tokyo?" 或 "Any restaurant suggestions in Seattle?"
+Step 3 — Function Calling (Tool Calling)
+=========================================
+Building on step2, this adds the ability for the agent to call external tools.
+After running, you can ask the agent "What's the weather in Tokyo?" or "Any restaurant suggestions in Seattle?"
 
-你会学到：
-    1. FunctionSchema — 怎么定义一个工具的参数格式
-    2. ToolsSchema     — 把多个工具打包给 LLM
-    3. llm.register_function() — 注册工具的实际处理函数
-    4. FunctionCallParams — 函数被调用时的参数和回调
-    5. 事件 on_function_calls_started — 工具被调用时的 hook
+What you'll learn:
+    1. FunctionSchema — how to define the parameter schema for a tool
+    2. ToolsSchema     — how to bundle multiple tools together for the LLM
+    3. llm.register_function() — register the actual handler function for a tool
+    4. FunctionCallParams — the arguments and result callback passed when a function is invoked
+    5. Event on_function_calls_started — a hook that fires when a tool is called
 
-安装依赖：
+Install dependencies:
     pip install "pipecat-ai[local,deepgram,openai,cartesia,silero]" python-dotenv loguru
 """
 
@@ -49,15 +49,15 @@ logger.add(sys.stderr, level="DEBUG")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 工具函数（模拟 API 调用）
-# 真实场景里这里会调用天气 API、数据库等
+# Tool functions (simulating API calls)
+# In a real scenario these would call a weather API, database, etc.
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def get_current_weather(params: FunctionCallParams):
     location = params.arguments.get("location", "Unknown")
     format_ = params.arguments.get("format", "fahrenheit")
     logger.info(f"Tool called: get_current_weather({location}, {format_})")
-    # 模拟 API 结果
+    # Simulated API result
     await params.result_callback({
         "location": location,
         "conditions": "sunny",
@@ -69,7 +69,7 @@ async def get_current_weather(params: FunctionCallParams):
 async def get_restaurant_recommendation(params: FunctionCallParams):
     location = params.arguments.get("location", "Unknown")
     logger.info(f"Tool called: get_restaurant_recommendation({location})")
-    # 模拟推荐
+    # Simulated recommendation
     await params.result_callback({
         "name": "The Golden Spoon",
         "cuisine": "Italian",
@@ -79,7 +79,7 @@ async def get_restaurant_recommendation(params: FunctionCallParams):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 工具的 schema（告诉 LLM 工具叫什么、有哪些参数）
+# Tool schemas (tell the LLM each tool's name and parameters)
 # ═══════════════════════════════════════════════════════════════════════════
 
 weather_tool = FunctionSchema(
@@ -111,7 +111,7 @@ restaurant_tool = FunctionSchema(
     required=["location"],
 )
 
-# 把所有工具打包
+# Bundle all tools together
 tools = ToolsSchema(standard_tools=[weather_tool, restaurant_tool])
 
 
@@ -141,17 +141,17 @@ async def main():
         ),
     )
 
-    # ── 注册工具函数 ──────────────────────────────────────────────────────
-    # 把 LLM 的 function call 和实际的 Python 函数绑定
+    # ── Register tool functions ───────────────────────────────────────────
+    # Bind the LLM's function calls to their actual Python implementations
     llm.register_function("get_current_weather", get_current_weather)
     llm.register_function("get_restaurant_recommendation", get_restaurant_recommendation)
 
-    # ── 事件：工具被调用时，先说一句话让用户知道在处理 ──────────────────
+    # ── Event: when a tool is called, speak a line so the user knows we're working on it ──
     @llm.event_handler("on_function_calls_started")
     async def on_function_calls_started(service, function_calls):
         await tts.queue_frame(TTSSpeakFrame("Let me check on that for you."))
 
-    # Context 里传入 tools，LLM 就知道有哪些工具可以用
+    # Passing tools into the Context lets the LLM know which tools are available
     context = LLMContext(tools=tools)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,

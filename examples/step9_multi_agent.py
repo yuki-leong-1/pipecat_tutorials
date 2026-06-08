@@ -1,34 +1,34 @@
 """
-Step 9 — Multi-Agent 架构（Pipecat Subagents）
-===============================================
-当一个 pipeline 不够用时，用多个 agent 协作。
-每个 agent 有自己的 LLM + pipeline，通过 AgentBus 通信。
+Step 9 — Multi-Agent Architecture (Pipecat Subagents)
+======================================================
+When a single pipeline isn't enough, use multiple agents working together.
+Each agent has its own LLM + pipeline and communicates via the AgentBus.
 
-你会学到：
-    1. AgentRunner      — 管理所有 agent 的生命周期
-    2. AgentBus         — agent 间通信的消息总线
-    3. BusBridgeProcessor — 主 pipeline 里的"路由器"，把 frame 分发给 active agent
-    4. LLMAgent         — 有 LLM pipeline 的 agent 基类
-    5. @tool decorator  — 在 LLMAgent 里注册工具（比 register_function 更简洁）
-    6. handoff_to()     — 把控制权转交给另一个 agent（无缝切换）
-    7. @agent_ready     — 等指定 agent 启动完成后执行
+What you'll learn:
+    1. AgentRunner        — manages the lifecycle of all agents
+    2. AgentBus           — message bus for inter-agent communication
+    3. BusBridgeProcessor — the "router" in the main pipeline that dispatches frames to the active agent
+    4. LLMAgent           — base class for an agent that has its own LLM pipeline
+    5. @tool decorator    — registers tools inside an LLMAgent (cleaner than register_function)
+    6. handoff_to()       — transfers control to another agent (seamless handoff)
+    7. @agent_ready       — runs a callback once the specified agent has finished starting up
 
-架构图：
+Architecture diagram:
     AgentRunner
-      └── MainAgent（拥有 transport + BusBridgeProcessor）
-            ├── GreeterAgent（问好 + 路由到 SupportAgent）
-            └── SupportAgent（回答问题 + 可以结束对话）
+      └── MainAgent (owns transport + BusBridgeProcessor)
+            ├── GreeterAgent (greets the user + routes to SupportAgent)
+            └── SupportAgent (answers questions + can end the conversation)
 
-    MainAgent 的 Pipeline：
+    MainAgent's Pipeline:
       mic → STT → user_agg → [BusBridgeProcessor] → TTS → speaker → assistant_agg
-                                     ↑↓  （通过 Bus）
-                               GreeterAgent / SupportAgent（各自有 LLM）
+                                     ↑↓  (via Bus)
+                               GreeterAgent / SupportAgent (each with its own LLM)
 
-对比 step2（单 agent）：
-    step2 = 一个 pipeline 里所有东西串在一起
-    step9 = main agent 路由音频，多个 LLM agent 并行待命，active agent 处理对话
+Compared with step2 (single agent):
+    step2 = everything chained together in one pipeline
+    step9 = main agent routes audio; multiple LLM agents wait in parallel; the active agent handles the conversation
 
-安装：
+Installation:
     uv add pipecat-ai-subagents
     uv add "pipecat-ai[local,deepgram,openai,elevenlabs,silero]"
 """
@@ -57,17 +57,17 @@ from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
 from pipecat.turns.user_mute import AlwaysUserMuteStrategy
 
-# ── Subagents 的核心 imports ──────────────────────────────────────────────
+# ── Core imports for Subagents ────────────────────────────────────────────
 from pipecat_subagents.agents import (
     BaseAgent,
-    LLMAgent,               # 有 LLM pipeline 的 agent
-    LLMAgentActivationArgs, # 激活 agent 时传入的参数
-    agent_ready,            # 等某个 agent 准备好后执行的 decorator
-    tool,                   # 在 LLMAgent 里注册工具（替代 register_function）
+    LLMAgent,               # agent base class that includes an LLM pipeline
+    LLMAgentActivationArgs, # arguments passed when activating an agent
+    agent_ready,            # decorator that runs after a specified agent has finished starting up
+    tool,                   # registers tools inside an LLMAgent (replaces register_function)
 )
-from pipecat_subagents.bus import AgentBus, BusBridgeProcessor  # 消息总线和路由器
-from pipecat_subagents.runner import AgentRunner                 # 管理所有 agent
-from pipecat_subagents.types import AgentReadyData               # @agent_ready 回调收到的数据
+from pipecat_subagents.bus import AgentBus, BusBridgeProcessor  # message bus and router
+from pipecat_subagents.runner import AgentRunner                 # manages all agents
+from pipecat_subagents.types import AgentReadyData               # data received by @agent_ready callbacks
 
 load_dotenv()
 logger.remove(0)
@@ -75,18 +75,18 @@ logger.remove(0)
 logger.add(sys.stderr, level="INFO")
 
 # ═══════════════════════════════════════════════════════════════════════════
-# LLM Agent 基类：两个 LLM agent 都继承这个
-# 共享工具：transfer_to_agent（切换 agent）和 end_conversation（结束对话）
+# LLM Agent base class: both LLM agents inherit from this
+# Shared tools: transfer_to_agent (switch agents) and end_conversation (end the conversation)
 # ═══════════════════════════════════════════════════════════════════════════
 class BaseVoiceAgent(LLMAgent):
 
     def __init__(self, name: str, *, bus: AgentBus, system_instruction: str):
-        # bridged=() 表示这个 agent 从 bus 接收 frame（不直接拥有 transport）
+        # bridged=() means this agent receives frames from the bus (it does not own a transport directly)
         super().__init__(name, bus=bus, bridged=())
         self._system_instruction = system_instruction
 
     def build_llm(self) -> LLMService:
-        """LLMAgent 要求实现：返回这个 agent 用的 LLM"""
+        """Required by LLMAgent: return the LLM instance this agent uses."""
         return OpenAILLMService(
             api_key=os.environ["OPENAI_API_KEY"],
             settings=OpenAILLMSettings(
@@ -95,8 +95,8 @@ class BaseVoiceAgent(LLMAgent):
             ),
         )
 
-    # ── @tool：比 register_function 更简洁的工具注册方式 ─────────────────
-    # cancel_on_interruption=False：即使用户打断，也要等工具执行完（确保 handoff 完成）
+    # ── @tool: a cleaner way to register tools than register_function ─────
+    # cancel_on_interruption=False: even if the user interrupts, wait for the tool to finish (ensures the handoff completes)
     @tool(cancel_on_interruption=False)
     async def transfer_to_agent(
         self, params: FunctionCallParams, agent: str, reason: str
@@ -134,7 +134,7 @@ class BaseVoiceAgent(LLMAgent):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# GreeterAgent：欢迎用户，了解需求后转给 SupportAgent
+# GreeterAgent: welcomes the user, then transfers to SupportAgent once the need is clear
 # ═══════════════════════════════════════════════════════════════════════════
 class GreeterAgent(BaseVoiceAgent):
 
@@ -151,7 +151,7 @@ class GreeterAgent(BaseVoiceAgent):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SupportAgent：处理具体问题，可以转回 greeter 或结束对话
+# SupportAgent: handles specific questions; can transfer back to greeter or end the conversation
 # ═══════════════════════════════════════════════════════════════════════════
 class SupportAgent(BaseVoiceAgent):
 
@@ -170,13 +170,13 @@ class SupportAgent(BaseVoiceAgent):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# MainAgent：拥有 transport，用 BusBridgeProcessor 替代 LLM
-# 负责音频 I/O，把 frame 通过 bus 路由给 active agent
+# MainAgent: owns the transport; uses BusBridgeProcessor in place of an LLM
+# Responsible for audio I/O and routing frames to the active agent via the bus
 # ═══════════════════════════════════════════════════════════════════════════
 class MainAgent(BaseAgent):
 
     def __init__(self, name: str, *, bus: AgentBus):
-        super().__init__(name, bus=bus, active=True)  # active=True 表示这个 agent 一开始就启动
+        super().__init__(name, bus=bus, active=True)  # active=True means this agent starts up immediately
         self._transport = LocalAudioTransport(
             LocalAudioTransportParams(
                 audio_in_enabled=True,
@@ -186,7 +186,7 @@ class MainAgent(BaseAgent):
         )
 
     async def build_pipeline(self) -> Pipeline:
-        """BaseAgent 可选实现：定义这个 agent 的 pipeline"""
+        """Optional override from BaseAgent: defines this agent's pipeline."""
         stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
         tts = ElevenLabsTTSService(
             api_key=os.environ["ELEVENLABS_API_KEY"],
@@ -202,15 +202,16 @@ class MainAgent(BaseAgent):
             ),
         )
 
-        # BusBridgeProcessor：替代 LLM 的位置
-        # 它把来自 STT 的 frame 发到 bus，active agent 处理后把回复发回来
+        # BusBridgeProcessor: sits in the position normally occupied by an LLM.
+        # It forwards frames from STT onto the bus; the active agent processes them
+        # and sends its reply back through the bus.
         bridge = BusBridgeProcessor(bus=self.bus, agent_name=self.name)
 
         pipeline = Pipeline([
             self._transport.input(),
             stt,
             user_aggregator,
-            bridge,             # ← 核心：路由 frame 给 active LLM agent
+            bridge,             # ← key: routes frames to the active LLM agent
             tts,
             self._transport.output(),
             assistant_aggregator,
@@ -219,16 +220,16 @@ class MainAgent(BaseAgent):
         self._task = PipelineTask(pipeline, params=PipelineParams())
         return pipeline
 
-    # name= 是关键字参数（agent_ready 签名是 *, name: str）
-    # handler 会被调用为 handler(data)，所以必须接收 data: AgentReadyData
+    # name= is a keyword argument (agent_ready signature is *, name: str)
+    # the handler is called as handler(data), so it must accept data: AgentReadyData
     @agent_ready(name="greeter")
     async def on_greeter_ready(self, data: AgentReadyData):
-        """等 GreeterAgent 准备好后，激活它并让它先开口打招呼"""
+        """Once GreeterAgent is ready, activate it so it speaks first."""
         logger.info("Greeter agent ready, activating...")
-        # 关键：必须传 args + messages，greeter 的 LLM 才会运行、主动问好。
-        # 源码 LLMAgent.on_activated 里只有 `if activation.messages:` 时才会
-        # queue LLMMessagesAppendFrame(run_llm=True)。不传 messages 的话
-        # greeter 虽然被激活，但 LLM 永远不跑 → bot 一直静默等你先说话。
+        # Key: activation_args must include messages so the greeter's LLM actually runs and greets proactively.
+        # In LLMAgent.on_activated, the LLM only runs when `if activation.messages:` is true.
+        # Without messages the greeter is activated but the LLM never fires → the bot stays
+        # silent indefinitely, waiting for the user to speak first.
         await self.activate_agent(
             "greeter",
             args=LLMAgentActivationArgs(
@@ -242,28 +243,31 @@ class MainAgent(BaseAgent):
 
 
 async def main():
-    # AgentRunner：管理所有 agent 的生命周期
-    # 默认用 AsyncQueueBus（in-process，不需要 Redis）
+    # AgentRunner: manages the lifecycle of all agents.
+    # Uses AsyncQueueBus by default (in-process; no Redis required).
     runner = AgentRunner(handle_sigint=False if sys.platform == "win32" else True)
 
-    # 建立所有 agent（共享 runner.bus）
+    # Create all agents (they share runner.bus)
     main_agent = MainAgent("main", bus=runner.bus)
     greeter = GreeterAgent("greeter", bus=runner.bus)
     support = SupportAgent("support", bus=runner.bus)
 
-    # 把 main 加入 runner。run() 之前加的 root agent 会被 runner 暂存，
-    # 在 run() 启动时统一拉起 —— 这条没问题。
+    # Add main to the runner. Agents added before run() are held by the runner
+    # and started together when run() is called — this part is fine.
     await runner.add_agent(main_agent)
 
-    # ⚠️ 关键修复：子 agent 不能在 run() 之前加。
-    # main_agent.add_agent(child) 会往 bus 发一条 BusAddAgentMessage，
-    # 但 runner 是在 run() 里才 subscribe + start bus 的。run() 之前发的消息
-    # 因为「没有订阅者」被 AgentBus.on_message_received 直接丢弃（for 空循环），
-    # 于是 runner 永远不知道 greeter/support 的存在 → 它们的 pipeline 从不启动
-    # → 永不 ready → on_greeter_ready 不触发 → bot 全程静默、连 log 都没有。
+    # ⚠️ Critical fix: child agents must NOT be added before run().
+    # main_agent.add_agent(child) sends a BusAddAgentMessage onto the bus,
+    # but the runner only subscribes to and starts the bus inside run().
+    # Messages sent before run() are silently dropped by AgentBus.on_message_received
+    # (the subscriber list is empty, so the for-loop body never executes).
+    # As a result the runner never learns about greeter/support → their pipelines
+    # never start → they never become ready → on_greeter_ready never fires →
+    # the bot is completely silent with no log output whatsoever.
     #
-    # 解决：等 main 的 pipeline 起来（on_ready 触发，此时 bus 已经在跑、runner
-    # 已订阅）之后再 add_agent，消息才送得到 runner。
+    # Fix: wait until main's pipeline is running (on_ready fires, meaning the bus
+    # is live and the runner is subscribed), then call add_agent — the message
+    # will actually reach the runner.
     @main_agent.event_handler("on_ready")
     async def _add_children(agent):
         logger.info("Main agent ready, adding child agents...")

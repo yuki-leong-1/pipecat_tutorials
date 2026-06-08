@@ -1,25 +1,30 @@
 """
-Step 17 — Context Summarization（长对话记忆压缩）
-==================================================
-对话越长，LLM context 越大，token 越贵，速度越慢，最终超出 context window 报错。
-Pipecat 内建自动压缩：超过阈值时，让 LLM 把旧消息压缩成摘要，保留近期内容。
+Step 17 — Context Summarization (Long-Conversation Memory Compression)
+=======================================================================
+The longer a conversation grows, the larger the LLM context becomes — more
+tokens means higher cost, slower responses, and eventually a context-window
+overflow error.  Pipecat has built-in automatic compression: once a threshold
+is exceeded, the LLM condenses old messages into a summary while keeping the
+most recent turns intact.
 
-效果：
-    消息 1-100：→ 摘要（"用户聊了天气、问了餐厅推荐，喜欢意大利菜…"）
-    消息 95-100：→ 保留（最近几条保持完整）
-    消息 101+：继续正常对话，LLM 看到：摘要 + 近期消息
+How it works:
+    Messages  1-100 → Summary ("User chatted about the weather, asked for
+                                restaurant recommendations, likes Italian food…")
+    Messages 95-100 → Preserved (the most recent turns remain in full)
+    Messages  101+  → Conversation continues normally; the LLM sees:
+                       summary + recent messages
 
-你会学到：
-    1. enable_auto_context_summarization — 一个参数开启自动压缩
-    2. LLMAutoContextSummarizationConfig — 配置触发条件（token 数、消息数）
-    3. LLMContextSummaryConfig — 配置摘要的目标大小和保留消息数
-    4. on_summary_applied — 压缩发生时的事件 hook
-    5. 手动触发：LLMSummarizeContextFrame（按需压缩，不等自动触发）
+What you will learn:
+    1. enable_auto_context_summarization — one parameter to turn on auto-compression
+    2. LLMAutoContextSummarizationConfig — configure trigger conditions (token count, message count)
+    3. LLMContextSummaryConfig — configure the target compressed size and number of messages to retain
+    4. on_summary_applied — event hook fired when compression occurs
+    5. Manual trigger: LLMSummarizeContextFrame (compress on demand, without waiting for auto-trigger)
 
-安装：（和 step2 一样）
+Installation: (same as step 2)
     uv add "pipecat-ai[local,deepgram,openai,elevenlabs,silero]"
 
-所需 API key：DEEPGRAM + OPENAI + ELEVENLABS
+Required API keys: DEEPGRAM + OPENAI + ELEVENLABS
 """
 
 import asyncio
@@ -46,7 +51,7 @@ from pipecat.utils.context.llm_context_summarization import (
     LLMAutoContextSummarizationConfig,
     LLMContextSummaryConfig,
 )
-# on_summary_applied 事件回调收到的数据对象（只含计数，不含摘要正文）
+# The data object received by the on_summary_applied event callback (contains counts only, not the summary text)
 from pipecat.processors.aggregators.llm_context_summarizer import SummaryAppliedEvent
 
 from pipecat.services.deepgram.stt import DeepgramSTTService
@@ -88,19 +93,19 @@ async def main():
 
     context = LLMContext()
 
-    # ── Context Summarization 配置 ─────────────────────────────────────────
-    # 触发条件（满足任一即触发）：
-    #   max_context_tokens = 1000   → context 估算超过 1000 token（~4000 字符）时触发
-    #   max_unsummarized_messages=5 → 新增超过 5 条消息时触发（测试用，很容易触发）
+    # ── Context Summarization configuration ───────────────────────────────
+    # Trigger conditions (either one is enough to trigger compression):
+    #   max_context_tokens = 1000   → triggers when the estimated context exceeds 1000 tokens (~4000 chars)
+    #   max_unsummarized_messages=5 → triggers when more than 5 new messages accumulate (low value for easy testing)
     #
-    # 实际生产建议值：
-    #   max_context_tokens = 8000 (默认), max_unsummarized_messages = 20 (默认)
+    # Recommended production values:
+    #   max_context_tokens = 8000 (default), max_unsummarized_messages = 20 (default)
     summarization_config = LLMAutoContextSummarizationConfig(
-        max_context_tokens=1000,         # 设小一点，容易触发，便于测试
-        max_unsummarized_messages=5,     # 每 5 条消息压缩一次（测试用）
+        max_context_tokens=1000,         # Set low so compression triggers easily during testing
+        max_unsummarized_messages=5,     # Compress every 5 messages (for testing)
         summary_config=LLMContextSummaryConfig(
-            target_context_tokens=500,   # 压缩后目标 token 数
-            min_messages_after_summary=2, # 保留最近 2 条消息不压缩
+            target_context_tokens=500,   # Target token count after compression
+            min_messages_after_summary=2, # Keep the 2 most recent messages uncompressed
         ),
     )
 
@@ -111,17 +116,17 @@ async def main():
             user_mute_strategies=[AlwaysUserMuteStrategy()],
         ),
         assistant_params=LLMAssistantAggregatorParams(
-            # ── 核心：开启自动压缩 ──────────────────────────────────────
+            # ── Core: enable automatic compression ─────────────────────────
             enable_auto_context_summarization=True,
             auto_context_summarization_config=summarization_config,
         ),
     )
 
-    # ── 监听压缩事件 ──────────────────────────────────────────────────────
-    # 真实回调签名是 (aggregator, summarizer, event)：
-    #   - aggregator：发事件的 LLMAssistantAggregator
-    #   - summarizer：内部的 summarizer 对象
-    #   - event：SummaryAppliedEvent，只带「条数」统计，不带摘要正文
+    # ── Listen for compression events ────────────────────────────────────
+    # The actual callback signature is (aggregator, summarizer, event):
+    #   - aggregator : the LLMAssistantAggregator that fired the event
+    #   - summarizer : the internal summarizer object
+    #   - event      : SummaryAppliedEvent — carries message-count statistics only, not the summary text
     @assistant_aggregator.event_handler("on_summary_applied")
     async def on_summary_applied(aggregator, summarizer, event: SummaryAppliedEvent):
         print(f"\n[Context Summarized]")
@@ -142,7 +147,7 @@ async def main():
 
     task = PipelineTask(pipeline, params=PipelineParams())
 
-    # 也可以手动触发压缩（不等自动触发）：
+    # You can also trigger compression manually (without waiting for auto-trigger):
     # from pipecat.frames.frames import LLMSummarizeContextFrame
     # await task.queue_frames([LLMSummarizeContextFrame()])
 
@@ -160,9 +165,9 @@ async def main():
 
     print("=" * 55)
     print(" Context Summarization Demo")
-    print(" 每 5 条消息（或超 1000 token）自动压缩 context")
-    print(" 压缩时会打印 [Context Summarized]")
-    print(" 尽量多聊几轮触发压缩")
+    print(" Context is auto-compressed every 5 messages (or when exceeding 1000 tokens)")
+    print(" [Context Summarized] is printed when compression occurs")
+    print(" Chat for several rounds to trigger compression")
     print("=" * 55)
 
     await runner.run(task)
@@ -176,9 +181,9 @@ if __name__ == "__main__":
 # [transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
 # =======================================================
 #  Context Summarization Demo
-#  每 5 条消息（或超 1000 token）自动压缩 context
-#  压缩时会打印 [Context Summarized]
-#  尽量多聊几轮触发压缩
+#  Context is auto-compressed every 5 messages (or when exceeding 1000 tokens)
+#  [Context Summarized] is printed when compression occurs
+#  Chat for several rounds to trigger compression
 # =======================================================
 
 # [Context Summarized]

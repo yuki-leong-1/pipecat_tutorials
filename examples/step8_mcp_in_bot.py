@@ -1,30 +1,32 @@
 """
-Step 8 — MCPClient（在 bot 里接 MCP 工具）
-==========================================
-让 bot 的 LLM 直接调用 MCP server 提供的工具，不需要手动写 FunctionSchema。
+Step 8 — MCPClient (connecting MCP tools inside a bot)
+=======================================================
+Lets the bot's LLM call tools provided by an MCP server directly,
+without having to write FunctionSchema by hand.
 
-你会学到：
-    1. MCPClient                — 连接到 MCP server
-    2. mcp.register_tools(llm) — 自动发现工具 + 注册给 LLM（一行搞定 step3 手写的那些）
-    3. 三种连接方式：
-       - StdioServerParameters  → 本地进程（本例使用）
-       - SseServerParameters    → 远程 SSE
-       - StreamableHttpParameters → 远程 HTTP（如 GitHub Copilot MCP）
-    4. tools_filter             — 只暴露部分工具给 LLM
-    5. tools_output_filters     — 截断/过滤工具返回值（防止 context 爆炸）
+What you will learn:
+    1. MCPClient                — connect to an MCP server
+    2. mcp.register_tools(llm) — auto-discover tools + register them with the LLM
+                                  (replaces the manual wiring from step 3 in one line)
+    3. Three connection modes:
+       - StdioServerParameters  → local subprocess (used in this example)
+       - SseServerParameters    → remote SSE
+       - StreamableHttpParameters → remote HTTP (e.g. GitHub Copilot MCP)
+    4. tools_filter             — expose only a subset of tools to the LLM
+    5. tools_output_filters     — truncate/filter tool return values (prevents context overflow)
 
-对比 step3：
-    step3 = 手动写 FunctionSchema + register_function + 处理函数
-    step8 = MCPClient 自动发现 + 一行注册，LLM 直接调用 MCP server 的工具
+Compared with step 3:
+    step3 = manually write FunctionSchema + register_function + handler functions
+    step8 = MCPClient auto-discovers tools + registers them in one line; LLM calls the MCP server directly
 
-这个例子用 mcp-server-time（Pipecat 官方推荐的入门 MCP server）：
-    - 提供 get_current_time / list_timezones 工具
-    - 用 uvx 运行，不需要手动安装，不需要 Node.js
-    - 试着问 bot: "What time is it?" 或 "What time is it in Tokyo?"
+This example uses mcp-server-time (the recommended beginner MCP server from Pipecat):
+    - Provides get_current_time / list_timezones tools
+    - Runs via uvx — no manual installation, no Node.js required
+    - Try asking the bot: "What time is it?" or "What time is it in Tokyo?"
 
-安装：
+Installation:
     uv add "pipecat-ai[local,deepgram,openai,elevenlabs,silero,mcp]"
-    （mcp-server-time 由 uvx 自动处理）
+    (mcp-server-time is handled automatically by uvx)
 """
 
 import asyncio
@@ -51,7 +53,7 @@ from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 
-# ── MCPClient：连接 MCP server 的核心类 ───────────────────────────────────
+# ── MCPClient: the core class for connecting to an MCP server ────────────────
 from pipecat.services.mcp_service import MCPClient
 
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
@@ -88,29 +90,29 @@ async def main():
         ),
     )
 
-    # ── MCPClient：用 async with 管理连接生命周期 ─────────────────────────
-    # StdioServerParameters = 用本地子进程运行 MCP server
-    # uvx 是 uv 的工具运行器，类似 npx，自动安装并运行 Python 包
+    # ── MCPClient: use async with to manage the connection lifecycle ─────────
+    # StdioServerParameters = run the MCP server as a local subprocess
+    # uvx is uv's tool runner, similar to npx — automatically installs and runs Python packages
     async with MCPClient(
         server_params=StdioServerParameters(
-            command=shutil.which("uvx"),          # 找到 uvx 的路径
-            args=["mcp-server-time"],              # 运行 mcp-server-time
+            command=shutil.which("uvx"),          # locate the uvx executable
+            args=["mcp-server-time"],              # which server to run
         ),
-        # tools_filter：只暴露这两个工具给 LLM，忽略其他
+        # tools_filter: expose only these two tools to the LLM, ignore the rest
         tools_filter=["get_current_time", "convert_time"],
-        # tools_output_filters：截断过长的返回值
+        # tools_output_filters: truncate overly long return values
         tools_output_filters={
             "get_current_time": lambda r: str(r)[:200],
         },
     ) as mcp:
-        # register_tools 做了三件事：
-        # 1. 连接 MCP server，列出所有可用工具
-        # 2. 把工具 schema 转换成 Pipecat 的 FunctionSchema 格式
-        # 3. 调用 llm.register_function() 绑定每个工具的 handler
-        # 返回值是 ToolsSchema，传给 LLMContext 让 LLM 知道有哪些工具
+        # register_tools does three things:
+        # 1. Connects to the MCP server and lists all available tools
+        # 2. Converts each tool's schema into Pipecat's FunctionSchema format
+        # 3. Calls llm.register_function() to bind a handler for each tool
+        # The return value is a ToolsSchema; pass it to LLMContext so the LLM knows which tools exist
         tools = await mcp.register_tools(llm)
 
-        # LLMContext 需要传入 tools，LLM 才能在回复里调用它们
+        # LLMContext requires tools to be passed in so the LLM can call them in its responses
         context = LLMContext(tools=tools)
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
             context,
@@ -154,53 +156,57 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 
-# "MCP server" 是什么、在哪
+# What is the "MCP server" and where does it live?
 
-# 在 step8 里,MCP server = mcp-server-time —— 一个独立的 Python 程序。它不是常驻服务,而是 step8 运行时通过 stdio 临时拉起的子进程,bot 退出时它也跟着退出。
+# In step 8, the MCP server is mcp-server-time — a standalone Python program.
+# It is not a persistent service; instead, step 8 spawns it as a temporary
+# subprocess over stdio at runtime, and it exits when the bot exits.
 
-# 物理位置(磁盘上)
+# Physical location (on disk)
 
-# uvx 把它装成了一个独立的工具(自带一个 venv),三个关键路径:
+# uvx installs it as a self-contained tool (with its own venv). Three key paths:
 
 # ┌──────────────────────────────┬───────────────────────────────────────────────────────────────┐
-# │             内容             │                             路径                              │
+# │           Contents           │                             Path                              │
 # ├──────────────────────────────┼───────────────────────────────────────────────────────────────┤
-# │ 工具安装目录(独立 venv)      │ C:\Users\Yuki.Leong\AppData\Roaming\uv\tools\mcp-server-time\ │
+# │ Tool install dir (own venv)  │ C:\Users\Yuki.Leong\AppData\Roaming\uv\tools\mcp-server-time\ │
 # ├──────────────────────────────┼───────────────────────────────────┤
-# │ 可执行入口(真正被启动的 exe) │ ...\mcp-server-time\Scripts\mcp-server-time.exe               │
+# │ Executable entry point       │ ...\mcp-server-time\Scripts\mcp-server-time.exe               │
 # ├──────────────────────────────┼───────────────────────────────────────────────────────────────┤
-# │ Python 源码(server 逻辑)     │ ...\mcp-s\mcp_server_time\        │
+# │ Python source (server logic) │ ...\mcp-s\mcp_server_time\        │
 # ├──────────────────────────────┼───────────────────────────────────────────────────────────────┤
-# │ uvx 下载缓存                 │ C:\Users\Yuki.Leong\AppData\Local\uv\cache                    │
+# │ uvx download cache           │ C:\Users\Yuki.Leong\AppData\Local\uv\cache                    │
 # └──────────────────────────────┴───────────────────────────────────┘
 
-# 版本:mcp-server-time v2026.6.4。
+# Version: mcp-server-time v2026.6.4.
 
-# 它是怎么被启动的
+# How it gets started
 
-# step8 的这几行就是"指定 MCP server 在哪 + 怎么跑":
+# These lines in step 8 specify where the MCP server is and how to run it:
 
 # server_params=StdioServerParameters(
-#     command=shutil.which("uvx"),     # 用 uvx 来启动
-#     args=["mcp-server-time"],         # 启动哪个 server
+#     command=shutil.which("uvx"),     # use uvx to launch it
+#     args=["mcp-server-time"],         # which server to start
 # )
 
-# 执行流程:
+# Execution flow:
 
-# step8 (你的 bot)
-#    └─ uvx mcp-server-time          ← 启动
-#         └─ mcp-server-time.exe      ← 真正的 MCP server 进程
-#              ↕ stdio (stdin/stdout 上跑 JSON-RPC)
-#         bot 通过这条管道发现工具 (get_curr 用
+# step8 (your bot)
+#    └─ uvx mcp-server-time          ← spawned
+#         └─ mcp-server-time.exe      ← the actual MCP server process
+#              ↕ stdio (JSON-RPC over stdin/stdout)
+#         bot discovers tools via this pipe (get_curr ...
 
-# bot 和 server 之间靠**标准输入输出(stdio)**通信,不走网络端口 —— 所以你在任务管理器或 netstat 里看不到监听端口,它就是个临时子进程。
+# The bot and the server communicate over standard I/O (stdio) — no network port is used.
+# That's why you won't see a listening port in Task Manager or netstat;
+# it's just a temporary child process.
 
-# 想直接看 / 手动跑它
+# Viewing / running the server directly
 
-# # 直接启动 server(会等 stdin 输入,Ctrl+C 退出)
+# # Start the server directly (waits for stdin input; press Ctrl+C to exit)
 # uvx mcp-server-time
 
-# # 看源码主入口
+# # View the main source entry point
 # code "C:\Users\Yuki.Leong\AppData\Roaming\uv\tools\mcp-server-time\Lib\site-packages\mcp_server_time\__main__.py"
 
-# # 确认它装在哪
+# # Confirm where it is installed

@@ -1,24 +1,24 @@
 """
-Step 15 — Speech-to-Speech：Gemini Live（LocalAudio 版）
-=========================================================
-和 step14 相同的 Speech-to-Speech 概念，但用 Google Gemini Live。
+Step 15 — Speech-to-Speech: Gemini Live (LocalAudio version)
+=============================================================
+Same Speech-to-Speech concept as step14, but using Google Gemini Live.
 
-OpenAI Realtime vs Gemini Live 对比：
-    OpenAI Realtime：  稳定，成熟，声音选择多，语义 turn 检测强
-    Gemini Live：      集成 Google 搜索工具，支持视频（multimodal），
-                       可以用 Google VAD 参数调整
+OpenAI Realtime vs Gemini Live comparison:
+    OpenAI Realtime:  Stable, mature, more voice options, strong semantic turn detection
+    Gemini Live:      Integrates Google Search tools, supports video (multimodal),
+                      supports VAD tuning via Google VAD parameters
 
-你会学到：
-    1. GeminiLiveLLMService — Gemini 的 S2S 实现
-    2. LiveVADParams / GeminiVADParams — Gemini 的 VAD 配置
-    3. 两个 S2S 服务的参数差异
-    4. 为什么 S2S pipeline 结构基本一样（universal LLMContext 的好处）
+What you will learn:
+    1. GeminiLiveLLMService — Gemini's S2S implementation
+    2. LiveVADParams / GeminiVADParams — Gemini's VAD configuration
+    3. Parameter differences between the two S2S services
+    4. Why S2S pipeline structures are essentially the same (the benefit of a universal LLMContext)
 
-安装：
+Installation:
     uv add "pipecat-ai[local,google,silero]"
 
-所需 API key：GOOGLE_API_KEY（需要 Gemini API 访问权限）
-申请：https://aistudio.google.com/apikey（免费）
+Required API key: GOOGLE_API_KEY (requires Gemini API access)
+Apply here: https://aistudio.google.com/apikey (free)
 """
 
 import asyncio
@@ -67,11 +67,11 @@ async def main():
             "No markdown or bullet points."
         ),
         params=GeminiLiveParams(
-            model="gemini-2.0-flash-live-001",  # 最新的 Gemini Live 模型
+            model="gemini-2.0-flash-live-001",  # Latest Gemini Live model
             voice_name="Puck",                   # Puck/Charon/Kore/Fenrir/Aoede
             input=InputParams(
-                # Gemini 的 VAD 参数（类似 OpenAI 的 turn_detection）
-                # 通过 GOOGLE_API_KEY 就能访问，无需额外配置
+                # Gemini's VAD parameters (similar to OpenAI's turn_detection)
+                # Accessible with just a GOOGLE_API_KEY — no extra configuration needed
             ),
         ),
     )
@@ -79,11 +79,11 @@ async def main():
     context = LLMContext()
     context_aggregator = LLMContextAggregatorPair(context)
 
-    # ── Pipeline 结构和 step14 完全一样 ──────────────────────────────────
+    # ── Pipeline structure is identical to step14 ────────────────────────
     pipeline = Pipeline([
         transport.input(),
         context_aggregator.user(),
-        llm,                           # GeminiLive 做 STT + LLM + TTS
+        llm,                           # GeminiLive handles STT + LLM + TTS
         transport.output(),
         context_aggregator.assistant(),
     ])
@@ -100,9 +100,9 @@ async def main():
 
     print("=" * 55)
     print(" Speech-to-Speech: Gemini Live (LocalAudio)")
-    print(" 一个模型做 STT + LLM + TTS")
-    print(" 建议戴耳机 (echo 问题)")
-    print(" Ctrl+C 结束")
+    print(" One model handles STT + LLM + TTS")
+    print(" Headphones recommended (echo issues)")
+    print(" Ctrl+C to quit")
     print("=" * 55)
 
     await runner.run(task)

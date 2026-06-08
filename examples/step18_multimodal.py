@@ -1,25 +1,26 @@
 """
-Step 18 — Multimodal（图片/图像进入 LLM Context）
-==================================================
-让 voice agent 能"看"图片：把图片加入 LLM context，用语音询问关于图片的问题。
+Step 18 — Multimodal (Images/Vision into LLM Context)
+======================================================
+Enable a voice agent to "see" images: add images to the LLM context and ask
+questions about them using voice.
 
-你会学到：
-    1. LLMContext.create_image_url_message() — 把图片 URL 加入 context
-    2. LLMContext.create_image_message()     — 把本地图片（bytes）加入 context
-    3. LLMMessagesAppendFrame + run_llm=True  — 注入图片后立刻触发 LLM
-    4. 用 FrameProcessor 监听关键词，动态注入图片到对话
-    5. 哪些 LLM 支持 multimodal（GPT-4o, Claude 3, Gemini）
+You will learn:
+    1. LLMContext.create_image_url_message() — add an image URL to the context
+    2. LLMContext.create_image_message()     — add a local image (bytes) to the context
+    3. LLMMessagesAppendFrame + run_llm=True  — inject an image and immediately trigger the LLM
+    4. Use a FrameProcessor to listen for keywords and dynamically inject images into the conversation
+    5. Which LLMs support multimodal input (GPT-4o, Claude 3, Gemini)
 
-用途：
-    - 视觉问答（"这张图里有什么？"）
-    - 文档理解（"帮我解释这张图表"）
-    - 实时视觉助手（截图 → 问问题）
-    - 医疗/工业图像分析
+Use cases:
+    - Visual question answering ("What is in this image?")
+    - Document comprehension ("Explain this chart for me")
+    - Real-time visual assistant (screenshot → ask a question)
+    - Medical / industrial image analysis
 
-安装：（和 step2 一样，gpt-4o-mini 支持图片）
+Installation: (same as step2; gpt-4o-mini supports images)
     uv add "pipecat-ai[local,deepgram,openai,elevenlabs,silero]"
 
-所需 API key：DEEPGRAM + OPENAI + ELEVENLABS
+Required API keys: DEEPGRAM + OPENAI + ELEVENLABS
 """
 
 import asyncio
@@ -56,26 +57,26 @@ load_dotenv()
 logger.remove(0)
 logger.add(sys.stderr, level="WARNING")
 
-# 测试用图片 URLs —— 关键：必须是 OpenAI 服务器能直接下载的地址！
-# create_image_url_message 只把 URL 发给 OpenAI，由 OpenAI 自己去下载图片。
-# ⚠️ 不要用 upload.wikimedia.org：它对非浏览器请求（包括 OpenAI 的下载器）
-#    返回 403/400 → OpenAI 报 400 invalid_image_url（之前就是这个错）。
-#    这里改用 Unsplash CDN（对任何客户端都返回 200）+ pipecat 仓库自带 logo。
+# Sample image URLs — important: must be publicly accessible addresses that OpenAI's servers can download directly!
+# create_image_url_message only sends the URL to OpenAI; OpenAI itself fetches the image.
+# ⚠️ Do not use upload.wikimedia.org: it returns 403/400 for non-browser requests (including OpenAI's downloader)
+#    → OpenAI reports 400 invalid_image_url (this was the error encountered previously).
+#    Using Unsplash CDN instead (returns 200 for any client) plus the Pipecat repo's own logo.
 SAMPLE_IMAGES = {
-    "pipecat": "https://raw.githubusercontent.com/pipecat-ai/pipecat/main/pipecat.png",       # Pipecat 官方 logo
-    "chart":   "https://images.unsplash.com/photo-1501854140801-50d01698950b?w=512&q=80",     # 绿色山峦风景照
-    "diagram": "https://images.unsplash.com/photo-1610832958506-aa56368176cf?w=512&q=80",     # 各种水果
+    "pipecat": "https://raw.githubusercontent.com/pipecat-ai/pipecat/main/pipecat.png",       # Pipecat official logo
+    "chart":   "https://images.unsplash.com/photo-1501854140801-50d01698950b?w=512&q=80",     # green mountain landscape photo
+    "diagram": "https://images.unsplash.com/photo-1610832958506-aa56368176cf?w=512&q=80",     # assorted fruits
 }
 
 
 class ImageInjector(FrameProcessor):
     """
-    监听用户说 "show image" 或 "load image"，把图片注入 LLM context。
+    Listens for the user saying "show image" or "load image" and injects an image into the LLM context.
 
-    核心模式：
-        1. LLMContext.create_image_url_message() 创建包含图片的 message
+    Core pattern:
+        1. LLMContext.create_image_url_message() creates a message containing the image
         2. LLMMessagesAppendFrame(messages=[image_msg], run_llm=True)
-           → 把图片加入 context，并立刻触发 LLM 生成描述
+           → adds the image to the context and immediately triggers the LLM to generate a description
     """
 
     def __init__(self, context: LLMContext, tts, task_ref: list):
@@ -91,17 +92,17 @@ class ImageInjector(FrameProcessor):
         if isinstance(frame, TranscriptionFrame):
             text = frame.text.lower()
 
-            # 用户说 "show image" 或 "describe image" 时加载图片
+            # Load an image when the user says "show image" or "describe image"
             if ("show image" in text or "load image" in text or "describe image" in text):
                 await self._load_image("chart", text)
                 return
 
-            # 用户说 "show pipecat logo" 时加载 pipecat logo
+            # Load the Pipecat logo when the user says "show pipecat logo"
             elif ("pipecat" in text or "cat" in text) and ("logo" in text or "image" in text):
                 await self._load_image("pipecat", text)
                 return
 
-            elif "fruit" in text or "食物" in text:
+            elif "fruit" in text or "food" in text:
                 await self._load_image("diagram", text)
                 return
 
@@ -110,8 +111,8 @@ class ImageInjector(FrameProcessor):
     async def _load_image(self, image_key: str, user_text: str):
         url = SAMPLE_IMAGES.get(image_key, SAMPLE_IMAGES["chart"])
 
-        # ── 核心：把图片 URL 加入 LLM context ────────────────────────────
-        # create_image_url_message() 创建 multimodal message（图片 + 文字）
+        # ── Core: add the image URL to the LLM context ──────────────────────
+        # create_image_url_message() creates a multimodal message (image + text)
         image_message = LLMContext.create_image_url_message(
             url=url,
             text=f"The user said: '{user_text}'. Describe what you see in this image in 2-3 sentences.",
@@ -119,8 +120,8 @@ class ImageInjector(FrameProcessor):
 
         task = self._task_ref[0]
         if task:
-            # LLMMessagesAppendFrame 把图片消息加入 context
-            # run_llm=True → 加入后立刻触发 LLM 生成回复
+            # LLMMessagesAppendFrame appends the image message to the context
+            # run_llm=True → triggers the LLM to generate a reply immediately after appending
             await task.queue_frames([
                 LLMMessagesAppendFrame(
                     messages=[image_message],
@@ -147,11 +148,11 @@ async def main():
         settings=ElevenLabsTTSService.Settings(voice="21m00Tcm4TlvDq8ikWAM"),
     )
 
-    # 使用支持图片的模型（gpt-4o-mini 也支持 vision）
+    # Use a model that supports images (gpt-4o-mini also supports vision)
     llm = OpenAILLMService(
         api_key=os.environ["OPENAI_API_KEY"],
         settings=OpenAILLMService.Settings(
-            model="gpt-4o-mini",  # vision 支持：gpt-4o, gpt-4o-mini, gpt-4-vision
+            model="gpt-4o-mini",  # vision-capable models: gpt-4o, gpt-4o-mini, gpt-4-vision
             system_instruction=(
                 "You are a helpful voice assistant that can see and describe images. "
                 "When shown an image, describe what you see naturally in conversational language. "
@@ -175,7 +176,7 @@ async def main():
     pipeline = Pipeline([
         transport.input(),
         stt,
-        image_injector,          # ← 监听用户指令，注入图片
+        image_injector,          # ← listens for user commands and injects images
         user_aggregator,
         llm,
         tts,

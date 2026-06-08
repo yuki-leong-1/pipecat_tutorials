@@ -1,42 +1,46 @@
 """
-Step 19 — Modular Pipeline：全部用 OpenAI（STT + LLM + TTS）
+Step 19 — Modular Pipeline: All OpenAI (STT + LLM + TTS)
 ==============================================================
-和 step2 一样是"三段式"语音 Agent，但三个服务全部换成 OpenAI，
-只需要 **一个** OPENAI_API_KEY 就能跑完整条 pipeline。
+Like step2, this is a "three-stage" voice agent, but all three services
+are replaced with OpenAI — you only need **one** OPENAI_API_KEY to run
+the entire pipeline.
 
-两种用 OpenAI 做语音 Agent 的方式：
+Two ways to build a voice agent with OpenAI:
 
-    Modular（本例，step19）        Speech-to-Speech（step14）
-    ────────────────────────       ──────────────────────────
-    mic → OpenAI STT               mic → OpenAI Realtime → speaker
-        → OpenAI LLM                          ↑
-        → OpenAI TTS               一个模型同时做 STT+LLM+TTS
-        → speaker                  延迟低（~300ms），但贵
-    三个独立模型，可单独替换/调试    黑盒，难插入自定义逻辑
-    延迟略高（~800ms），便宜        需要 Realtime API 访问权限
+    Modular (this example, step19)      Speech-to-Speech (step14)
+    ────────────────────────────────    ──────────────────────────────
+    mic → OpenAI STT                    mic → OpenAI Realtime → speaker
+        → OpenAI LLM                              ↑
+        → OpenAI TTS                   One model handles STT+LLM+TTS
+        → speaker                      Lower latency (~300ms), but pricier
+    Three independent models,          Black box, hard to inject custom logic
+    each swappable/debuggable          Requires Realtime API access
+    Slightly higher latency (~800ms),
+    cheaper
 
-为什么叫 "modular"（模块化）：
-    STT / LLM / TTS 是三个独立的处理器，可以各自替换。
-    想换 STT？把 OpenAISTTService 换成 DeepgramSTTService 即可（step2 就是混搭）。
-    想换 TTS？换成 ElevenLabsTTSService / CartesiaTTSService 即可。
-    本例展示的是"全 OpenAI"这一种组合 —— 单一供应商、单一 key、单一账单。
+Why it's called "modular":
+    STT / LLM / TTS are three independent processors, each replaceable.
+    Want to swap STT? Replace OpenAISTTService with DeepgramSTTService (step2 mixes them).
+    Want to swap TTS? Replace with ElevenLabsTTSService / CartesiaTTSService.
+    This example shows the "all-OpenAI" combination — single vendor, single key, single bill.
 
-你会学到：
-    1. OpenAISTTService —— OpenAI 的语音转文字（gpt-4o-transcribe）
-    2. OpenAITTSService —— OpenAI 的文字转语音（gpt-4o-mini-tts）
-    3. 三个服务共用一个 OPENAI_API_KEY
-    4. OpenAI STT 是 "segmented"（按句转录）：靠 VAD 切句子，
-       aggregator 上的 VAD 会把 speaking 事件向上游广播给 STT
+What you'll learn:
+    1. OpenAISTTService —— OpenAI speech-to-text (gpt-4o-transcribe)
+    2. OpenAITTSService —— OpenAI text-to-speech (gpt-4o-mini-tts)
+    3. All three services share a single OPENAI_API_KEY
+    4. OpenAI STT operates in "segmented" mode (transcribes sentence by sentence):
+       VAD on the aggregator detects speech start/end and broadcasts those events
+       upstream to the STT processor
 
-安装依赖：
+Install dependencies:
     uv add "pipecat-ai[local,openai,silero]" python-dotenv loguru
-    （不需要 deepgram / elevenlabs / cartesia）
+    (no deepgram / elevenlabs / cartesia needed)
 
-所需 API key：只要 OPENAI_API_KEY 一个
+Required API key: only OPENAI_API_KEY
 
-配置：
-    复制 .env.example 为 .env，填入 OPENAI_API_KEY
-    Ctrl+C 结束程序
+Configuration:
+    Copy .env.example to .env and fill in OPENAI_API_KEY
+    Press Ctrl+C to exit
 """
 
 import asyncio
@@ -46,38 +50,38 @@ import sys
 from dotenv import load_dotenv
 from loguru import logger
 
-# VAD：检测用户说话的开始和结束（OpenAI segmented STT 靠它切句子）
+# VAD: detects when the user starts and stops speaking (OpenAI segmented STT uses it to cut sentences)
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 
-# Frames：数据的"容器"
+# Frames: containers for data
 from pipecat.frames.frames import LLMRunFrame
 
-# Pipeline：处理器的链条
+# Pipeline: the chain of processors
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 
-# Context：存对话历史
+# Context: stores conversation history
 from pipecat.processors.aggregators.llm_context import LLMContext
 
-# Aggregators：积累转录/回复到 context
+# Aggregators: accumulate transcriptions/responses into context
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
 
-# AlwaysUserMuteStrategy：bot 说话时静音用户输入，防止扬声器回声打断自己
+# AlwaysUserMuteStrategy: mutes user input while the bot is speaking, preventing speaker echo from interrupting itself
 from pipecat.turns.user_mute import AlwaysUserMuteStrategy
 
-# ── 三个 AI 服务，全部来自 OpenAI ──────────────────────────────────────────
-from pipecat.services.openai.stt import OpenAISTTService   # 语音 → 文字
-from pipecat.services.openai.llm import OpenAILLMService   # 文字 → 回复
-from pipecat.services.openai.tts import OpenAITTSService   # 文字 → 语音
+# ── Three AI services, all from OpenAI ─────────────────────────────────────────
+from pipecat.services.openai.stt import OpenAISTTService   # speech → text
+from pipecat.services.openai.llm import OpenAILLMService   # text → response
+from pipecat.services.openai.tts import OpenAITTSService   # text → speech
 
-# 语言枚举（给 STT 指定输入语言）
+# Language enum (tells STT the input language)
 from pipecat.transcriptions.language import Language
 
-# 本地音频 Transport（电脑麦克风 + 喇叭）
+# Local audio Transport (computer mic + speakers)
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
 
 load_dotenv()
@@ -88,42 +92,43 @@ logger.add(sys.stderr, level="DEBUG")
 
 async def main():
     # ═══════════════════════════════════════════════════════════════════════
-    # 1. TRANSPORT —— 本地麦克风（input）+ 喇叭（output）
+    # 1. TRANSPORT —— local microphone (input) + speakers (output)
     # ═══════════════════════════════════════════════════════════════════════
-    # 列出设备编号：
+    # To list device indices:
     #   uv run python -c "import pyaudio; p = pyaudio.PyAudio(); [print(i, p.get_device_info_by_index(i)['name']) for i in range(p.get_device_count())]"
-    # 把实体麦克风编号填入 input_device_index（None = 系统默认）
+    # Fill in the physical mic index for input_device_index (None = system default)
     transport = LocalAudioTransport(
         LocalAudioTransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            input_device_index=1,  # 实体麦克风，避免 loopback 设备（device 0 / Sound Mapper）
+            input_device_index=1,  # physical mic — avoids loopback devices (device 0 / Sound Mapper)
         )
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 2. SERVICES —— 三个全是 OpenAI，共用同一个 OPENAI_API_KEY
+    # 2. SERVICES —— all three are OpenAI, sharing one OPENAI_API_KEY
     # ═══════════════════════════════════════════════════════════════════════
     api_key = os.environ["OPENAI_API_KEY"]
 
-    # STT：把语音变成文字
-    # 输入：AudioRawFrame  →  输出：TranscriptionFrame
-    # OpenAI STT 是 REST "segmented" 模式：VAD 判断你说完一句后，
-    # 把这一段音频整体发给 gpt-4o-transcribe 转录（不是逐字流式）。
+    # STT: converts speech to text
+    # Input: AudioRawFrame  →  Output: TranscriptionFrame
+    # OpenAI STT runs in REST "segmented" mode: once VAD detects you've finished
+    # a sentence, the audio segment is sent as a whole to gpt-4o-transcribe
+    # (not word-by-word streaming).
     stt = OpenAISTTService(
         api_key=api_key,
         settings=OpenAISTTService.Settings(
-            model="gpt-4o-transcribe",  # 也可用 "whisper-1" / "gpt-4o-mini-transcribe"
+            model="gpt-4o-transcribe",  # alternatives: "whisper-1" / "gpt-4o-mini-transcribe"
             language=Language.EN,
         ),
     )
 
-    # LLM：处理对话，生成回复
-    # 输入：LLMContextFrame  →  输出：TextFrame（流式）
+    # LLM: processes the conversation and generates a response
+    # Input: LLMContextFrame  →  Output: TextFrame (streaming)
     llm = OpenAILLMService(
         api_key=api_key,
         settings=OpenAILLMService.Settings(
-            model="gpt-4o-mini",  # 便宜快速，学习用
+            model="gpt-4o-mini",  # cheap and fast, good for learning
             system_instruction=(
                 "You are a helpful assistant in a voice conversation. "
                 "Keep your responses short and conversational (1-3 sentences). "
@@ -132,16 +137,16 @@ async def main():
         ),
     )
 
-    # TTS：把 LLM 的文字回复变成语音
-    # 输入：TextFrame  →  输出：TTSAudioRawFrame（24kHz PCM）
-    # 可选 voice：alloy / ash / ballad / cedar / coral / echo / fable /
-    #            marin / nova / onyx / sage / shimmer / verse
+    # TTS: converts the LLM's text response into speech
+    # Input: TextFrame  →  Output: TTSAudioRawFrame (24kHz PCM)
+    # Available voices: alloy / ash / ballad / cedar / coral / echo / fable /
+    #                   marin / nova / onyx / sage / shimmer / verse
     tts = OpenAITTSService(
         api_key=api_key,
         settings=OpenAITTSService.Settings(
             model="gpt-4o-mini-tts",
             voice="alloy",
-            # instructions：gpt-4o-mini-tts 支持"演技指导"，控制语气/情绪
+            # instructions: gpt-4o-mini-tts supports "acting directions" to control tone/emotion
             instructions="Speak in a warm, friendly and natural tone.",
         ),
     )
@@ -153,29 +158,31 @@ async def main():
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            # VAD 放在 aggregator 上：它检测到"说话开始/结束"后，会把
-            # VADUserStarted/StoppedSpeakingFrame 向【上游】广播。
-            # 上游的 OpenAI segmented STT 收到这些帧，才知道何时把缓存的
-            # 音频整段发去转录。所以这里的 VAD 同时驱动了 STT 切句 + 触发 LLM。
+            # VAD lives on the aggregator: when it detects "speech started/stopped",
+            # it broadcasts VADUserStarted/StoppedSpeakingFrame **upstream**.
+            # The upstream OpenAI segmented STT receives these frames to know when
+            # to send the buffered audio for transcription.
+            # So this VAD simultaneously drives STT sentence segmentation and LLM triggering.
             vad_analyzer=SileroVADAnalyzer(),
-            # 防回声：bot 说话时静音麦克风（用扬声器时必备；戴耳机可去掉以支持打断）
+            # Echo cancellation: mute the mic while the bot is speaking
+            # (essential when using speakers; remove when using headphones to allow interruption)
             user_mute_strategies=[AlwaysUserMuteStrategy()],
         ),
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 4. PIPELINE —— 和 step2 结构完全一样，只是三个服务都换成了 OpenAI
+    # 4. PIPELINE —— same structure as step2, just all three services swapped to OpenAI
     # ═══════════════════════════════════════════════════════════════════════
-    #  [麦克风] → transport.input() → stt → user_aggregator → llm → tts
-    #           → transport.output() → [喇叭] → assistant_aggregator
+    #  [mic] → transport.input() → stt → user_aggregator → llm → tts
+    #        → transport.output() → [speakers] → assistant_aggregator
     pipeline = Pipeline([
-        transport.input(),       # 从麦克风接收音频
-        stt,                     # OpenAI: 语音 → 文字
-        user_aggregator,         # 积累用户说的话（VAD 在这里）
-        llm,                     # OpenAI: 生成回复
-        tts,                     # OpenAI: 文字 → 语音
-        transport.output(),      # 播放到喇叭
-        assistant_aggregator,    # 记录 agent 说的话
+        transport.input(),       # receive audio from mic
+        stt,                     # OpenAI: speech → text
+        user_aggregator,         # accumulate what the user said (VAD lives here)
+        llm,                     # OpenAI: generate response
+        tts,                     # OpenAI: text → speech
+        transport.output(),      # play to speakers
+        assistant_aggregator,    # record what the agent said
     ])
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -190,7 +197,7 @@ async def main():
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 6. 启动时让 AGENT 先开口
+    # 6. Let the agent speak first on startup
     # ═══════════════════════════════════════════════════════════════════════
     context.add_message({
         "role": "developer",
@@ -204,7 +211,7 @@ async def main():
     runner = PipelineRunner(handle_sigint=False if sys.platform == "win32" else True)
 
     print("\n🎤 Modular OpenAI voice agent is running! Speak into your microphone.")
-    print("   STT + LLM + TTS 全部由 OpenAI 提供，只用一个 API key。")
+    print("   STT + LLM + TTS are all provided by OpenAI — only one API key needed.")
     print("   Press Ctrl+C to stop.\n")
 
     await runner.run(task)

@@ -1,38 +1,38 @@
 """
-Step 14 — Speech-to-Speech：OpenAI Realtime（LocalAudio 版）
-=============================================================
-传统 pipeline：mic → Deepgram STT → OpenAI LLM → ElevenLabs TTS → speaker
-                    ↑                                              ↑
-              独立 STT 服务                               独立 TTS 服务
-              E2E 延迟 ~800ms
+Step 14 — Speech-to-Speech: OpenAI Realtime (LocalAudio version)
+=================================================================
+Traditional pipeline: mic → Deepgram STT → OpenAI LLM → ElevenLabs TTS → speaker
+                           ↑                                               ↑
+                   separate STT service                          separate TTS service
+                   E2E latency ~800ms
 
-Speech-to-Speech：mic → OpenAI Realtime → speaker
-                              ↑
-                   一个服务同时做 STT + LLM + TTS
-                   E2E 延迟 ~300ms
+Speech-to-Speech: mic → OpenAI Realtime → speaker
+                                ↑
+                     one service handles STT + LLM + TTS simultaneously
+                     E2E latency ~300ms
 
-你会学到：
-    1. OpenAIRealtimeLLMService — 一个服务取代三个（STT + LLM + TTS）
-    2. SessionProperties — 配置 Realtime session（语音、VAD、转录等）
-    3. SemanticTurnDetection — 比 Silero VAD 更智能的语义 turn 检测
-    4. InputAudioNoiseReduction — 内建降噪（far_field = 扬声器场景）
-    5. Pipeline 结构变化：不需要 Deepgram / ElevenLabs 了
-    6. universal LLMContext + LLMContextAggregatorPair（和传统 pipeline 一样）
+What you will learn:
+    1. OpenAIRealtimeLLMService — one service replaces three (STT + LLM + TTS)
+    2. SessionProperties — configure the Realtime session (voice, VAD, transcription, etc.)
+    3. SemanticTurnDetection — smarter semantic turn detection than Silero VAD
+    4. InputAudioNoiseReduction — built-in noise reduction (far_field = speaker scenario)
+    5. Pipeline structure change: no longer need Deepgram / ElevenLabs
+    6. universal LLMContext + LLMContextAggregatorPair (same as the traditional pipeline)
 
-Pipeline 对比：
-    传统：transport.input() → stt → user_agg → llm → tts → transport.output() → asst_agg
-    S2S ：transport.input() → user_agg → [OpenAIRealtime] → transport.output() → asst_agg
-                                              (STT+LLM+TTS 都在里面)
+Pipeline comparison:
+    Traditional: transport.input() → stt → user_agg → llm → tts → transport.output() → asst_agg
+    S2S:         transport.input() → user_agg → [OpenAIRealtime] → transport.output() → asst_agg
+                                                   (STT+LLM+TTS all handled internally)
 
-你的 Twilio 版本（生产级，带 WebSocket server）：
+Your Twilio version (production-grade, with WebSocket server):
     C:\\Users\\Yuki.Leong\\github\\twilio
 
-安装：
+Installation:
     uv add "pipecat-ai[local,openai,silero]"
-    （不需要 deepgram 或 elevenlabs）
+    (no deepgram or elevenlabs needed)
 
-所需 API key：OPENAI_API_KEY（需要 Realtime API 访问权限：gpt-4o-realtime-preview）
-注意：建议戴耳机，或开启 InputAudioNoiseReduction 减少回声
+Required API key: OPENAI_API_KEY (requires Realtime API access: gpt-4o-realtime-preview)
+Note: headphones are recommended, or enable InputAudioNoiseReduction to reduce echo
 """
 
 import asyncio
@@ -77,28 +77,28 @@ async def main():
         )
     )
 
-    # ── SessionProperties：配置 Realtime session ──────────────────────────
-    # 这里集中配置所有行为：语音选择、VAD 策略、降噪、转录模型等
+    # ── SessionProperties: configure the Realtime session ────────────────
+    # All behaviour is configured here: voice selection, VAD strategy, noise reduction, transcription model, etc.
     session_properties = SessionProperties(
         instructions=(
             "You are a helpful voice assistant. "
             "Keep responses short and conversational. "
             "No markdown or bullet points."
         ),
-        output_modalities=["audio"],  # 输出纯音频（不需要 TTS）
+        output_modalities=["audio"],  # output audio only (no TTS needed)
         audio=AudioConfiguration(
             input=AudioInput(
-                # 内建转录：把用户说的话转成文字（可选，便于调试）
+                # built-in transcription: converts what the user says to text (optional, useful for debugging)
                 transcription=InputAudioTranscription(
                     model="gpt-4o-transcribe"
                 ),
-                # 降噪：far_field 适合扬声器场景（mic 离扬声器较远）
+                # noise reduction: far_field is suited for speaker scenarios (mic is far from the speaker)
                 noise_reduction=InputAudioNoiseReduction(type="far_field"),
-                # 语义 turn 检测：比 Silero VAD 更智能，理解语义边界
-                # eagerness='low' = 等用户说完整句子再回复（减少误打断）
+                # semantic turn detection: smarter than Silero VAD, understands semantic boundaries
+                # eagerness='low' = wait for the user to finish a complete sentence before responding (reduces false interruptions)
                 turn_detection=SemanticTurnDetection(
                     eagerness="low",
-                    interrupt_response=True,  # 允许用户打断 bot
+                    interrupt_response=True,  # allow the user to interrupt the bot
                 ),
             ),
             output=AudioOutput(
@@ -108,7 +108,7 @@ async def main():
     )
 
     # ── OpenAI Realtime LLM Service ───────────────────────────────────────
-    # 注意：这一个服务替代了传统 pipeline 里的 STT + LLM + TTS 三个服务
+    # Note: this single service replaces the STT + LLM + TTS trio from the traditional pipeline
     llm = OpenAIRealtimeLLMService(
         api_key=os.environ["OPENAI_API_KEY"],
         settings=OpenAIRealtimeLLMService.Settings(
@@ -117,17 +117,17 @@ async def main():
         ),
     )
 
-    # ── Context 和 Aggregators ────────────────────────────────────────────
-    # 和传统 pipeline 完全相同！universal LLMContext 的优势之一
+    # ── Context and Aggregators ───────────────────────────────────────────
+    # Identical to the traditional pipeline! One of the advantages of the universal LLMContext
     context = LLMContext()
     context_aggregator = LLMContextAggregatorPair(context)
 
     # ── Pipeline ──────────────────────────────────────────────────────────
-    # 注意没有 STT 和 TTS！OpenAI Realtime 内部处理了所有音频
+    # Note: no STT or TTS! OpenAI Realtime handles all audio internally
     pipeline = Pipeline([
         transport.input(),
-        context_aggregator.user(),    # 处理用户 context（不再需要 VAD 参数）
-        llm,                          # ← 一个服务做三件事
+        context_aggregator.user(),    # handle user context (VAD params no longer needed)
+        llm,                          # ← one service does three things
         transport.output(),
         context_aggregator.assistant(),
     ])
@@ -144,9 +144,9 @@ async def main():
 
     print("=" * 55)
     print(" Speech-to-Speech: OpenAI Realtime (LocalAudio)")
-    print(" 一个模型做 STT + LLM + TTS，延迟 ~300ms")
-    print(" 建议戴耳机 (echo 问题)")
-    print(" Ctrl+C 结束")
+    print(" One model handles STT + LLM + TTS, latency ~300ms")
+    print(" Headphones recommended (echo issues)")
+    print(" Ctrl+C to exit")
     print("=" * 55)
 
     await runner.run(task)

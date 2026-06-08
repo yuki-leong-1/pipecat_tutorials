@@ -1,26 +1,29 @@
 """
-Step 6 — 动态 Context 注入（Persona 切换 + 用户记忆）
-======================================================
-一个"真实感"更强的 agent：知道你是谁、可以中途换性格、可以注入外部信息。
+Step 6 — Dynamic Context Injection (Persona Switching + User Memory)
+=====================================================================
+A more "life-like" agent: it knows who you are, can switch personality
+mid-conversation, and can inject external information on the fly.
 
-你会学到：
-    1. 用户 Profile 注入 ── 启动时把用户信息加入 context
-    2. Persona 切换 ── 说 "switch to formal" 让 agent 变成正式语气
-    3. 动态 context 注入 ── 运行时插入信息（如搜索结果、数据库查询）
-    4. LLMMessagesAppendFrame ── 不打断对话地往 context 加消息
-    5. LLMMessagesUpdateFrame ── 完全替换 context（核弹级重置）
-    6. 用 FrameProcessor 监听关键词，触发 context 操作
+What you'll learn:
+    1. User Profile injection   ── load user info into context at startup
+    2. Persona switching        ── say "switch to formal" to make the agent formal
+    3. Dynamic context injection ── insert information at runtime (e.g. search
+                                    results, database queries)
+    4. LLMMessagesAppendFrame   ── append messages to context without interrupting
+                                    the conversation
+    5. LLMMessagesUpdateFrame   ── fully replace context (nuclear-level reset)
+    6. Use a FrameProcessor to watch for keywords and trigger context operations
 
-运行方式：
+How to run:
     uv run python examples/step6_context_injection.py
 
-可以说的话：
-    - "switch to formal"  → agent 变成正式语气
-    - "switch to casual"  → agent 变回轻松语气
-    - "who am I"          → agent 会用注入的 profile 回答
-    - "what time is it"   → 演示注入实时数据
+Things you can say:
+    - "switch to formal"  → agent switches to a formal tone
+    - "switch to casual"  → agent switches back to a relaxed tone
+    - "who am I"          → agent answers using the injected profile
+    - "what time is it"   → demonstrates real-time data injection
 
-所需 API key：DEEPGRAM + OPENAI + ELEVENLABS
+Required API keys: DEEPGRAM + OPENAI + ELEVENLABS
 """
 
 import asyncio
@@ -59,7 +62,7 @@ logger.remove(0)
 logger.add(sys.stderr, level="WARNING")
 
 
-# ── 模拟用户 Profile（实际项目里从数据库读）──────────────────────────────────
+# ── Simulated user profile (in a real project, read this from a database) ────
 USER_PROFILE = {
     "name": "Alex",
     "language": "English",
@@ -67,7 +70,7 @@ USER_PROFILE = {
     "subscription": "Pro user since 2024",
 }
 
-# ── Persona 定义 ──────────────────────────────────────────────────────────
+# ── Persona definitions ───────────────────────────────────────────────────
 PERSONAS = {
     "casual": (
         "You are a friendly, casual assistant. Use relaxed language, "
@@ -81,10 +84,11 @@ PERSONAS = {
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CommandDetector：监听关键词，触发 context 操作
+# CommandDetector: watches for keywords and triggers context operations
 #
-# 这是 step4 学到的 FrameProcessor 模式的实际应用：
-# 拦截 TranscriptionFrame，检查关键词，注入对应的 context 变化
+# This is a real-world application of the FrameProcessor pattern learned in
+# step4: intercept TranscriptionFrames, check for keywords, and inject the
+# corresponding context changes.
 # ═══════════════════════════════════════════════════════════════════════════
 class CommandDetector(FrameProcessor):
 
@@ -102,42 +106,44 @@ class CommandDetector(FrameProcessor):
             text = frame.text.lower().strip()
             task = self._task_ref[0]
 
-            # ── 命令 1：切换 persona ──────────────────────────────────────
+            # ── Command 1: switch persona ─────────────────────────────────
             if "switch to formal" in text or "be more formal" in text:
                 await self._switch_persona("formal", task)
-                return  # 吞掉这个 frame，不进入 LLM
+                return  # swallow this frame — do not pass it to the LLM
 
             if "switch to casual" in text or "be more casual" in text:
                 await self._switch_persona("casual", task)
                 return
 
-            # ── 命令 2：注入实时数据（演示：当前时间）────────────────────
+            # ── Command 2: inject real-time data (demo: current time) ────
             if "what time" in text or "what's the time" in text:
                 now = datetime.now().strftime("%I:%M %p on %A, %B %d")
-                # LLMMessagesAppendFrame：不打断对话，直接往 context 里追加信息
-                # 这和 context.add_message() 的区别是：
-                # AppendFrame 会通过 pipeline 处理，确保时序正确
+                # LLMMessagesAppendFrame: append information to context without
+                # interrupting the conversation. The difference from calling
+                # context.add_message() directly is that AppendFrame is processed
+                # through the pipeline, ensuring correct ordering.
                 inject_frame = LLMMessagesAppendFrame(messages=[{
                     "role": "developer",
                     "content": f"[Real-time data injected] Current time: {now}. "
                                f"Answer the user's time question using this.",
                 }])
                 await self.push_frame(inject_frame, direction)
-                # 这次不 return，让原来的 TranscriptionFrame 也继续走
-                # LLM 会先看到注入的 developer 消息，再看到用户问题
+                # Do NOT return here — let the original TranscriptionFrame continue
+                # downstream as well. The LLM will see the injected developer
+                # message first, then the user's question.
 
         await self.push_frame(frame, direction)
 
     async def _switch_persona(self, persona_name: str, task):
-        """切换 persona：更新 system instruction + 触发 LLM 确认"""
+        """Switch persona: update the system instruction and trigger an LLM acknowledgement."""
         if persona_name == self._current_persona:
             return
 
         self._current_persona = persona_name
         new_instruction = PERSONAS[persona_name]
 
-        # LLMMessagesUpdateFrame：完全替换整个 context
-        # 用新的 system instruction 重建 context，但保留用户 profile
+        # LLMMessagesUpdateFrame: fully replace the entire context.
+        # Rebuild context with the new system instruction while retaining the user profile.
         new_messages = [
             {
                 "role": "developer",
@@ -171,9 +177,9 @@ async def main():
         settings=OpenAILLMService.Settings(model="gpt-4o-mini"),
     )
 
-    # ── Context 初始化：注入用户 Profile ──────────────────────────────────
-    # 这模拟了真实 agent 的常见模式：
-    # 用户登录后，从数据库读 profile，注入到 context 的 system message
+    # ── Context initialization: inject the user profile ───────────────────
+    # This simulates a common real-world agent pattern: after the user logs in,
+    # read their profile from a database and inject it into the context's system message.
     context = LLMContext()
     context.add_message({
         "role": "developer",
@@ -201,7 +207,7 @@ async def main():
     pipeline = Pipeline([
         transport.input(),
         stt,
-        command_detector,        # ← 在 user_aggregator 之前拦截命令
+        command_detector,        # ← intercepts commands before user_aggregator
         user_aggregator,
         llm,
         tts,
@@ -215,7 +221,7 @@ async def main():
     )
     task_ref[0] = task
 
-    # ── 启动：让 agent 先打招呼，并且用上 profile 里的名字 ──────────────
+    # ── Startup: have the agent greet the user by name from their profile ─
     context.add_message({
         "role": "developer",
         "content": "Greet the user by name. Keep it to one sentence.",
