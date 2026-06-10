@@ -26,8 +26,8 @@ Supports 100+ AI services (OpenAI, Anthropic, Deepgram, ElevenLabs, etc.).
 |---|---|---|
 | **Pipecat Framework** | Core Python framework | ✅ Primary |
 | **Pipecat Flows** | Structured conversation state machine | ✅ step7 |
-| **Client SDKs** | JS/React/iOS/Android clients | Advanced |
-| **Pipecat Subagents** | Multi-agent collaboration | Advanced |
+| **Client SDKs** | JS/React/iOS/Android clients | Skip for now |
+| **Pipecat Subagents** | Multi-agent collaboration | step9 |
 | **Pipecat Cloud** | Managed deployment | Skip for now |
 
 ---
